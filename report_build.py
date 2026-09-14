@@ -2198,6 +2198,12 @@ def _bridge_tail(stores, ctx, sh, ws, H, n):
     head()
     d1 = line("D1", "销售报表 “Total” 到账净额", V(lambda S: S["m"]["total"]),
               "桥 A 的结论。这是订单层面真正进你账户的钱，不是利润。", kind="s")
+    line("D1b", "＋ 加回部分退款被重复扣的佣金",
+         V(lambda S: S["cn"]["partial_total"]),
+         "销售报表对部分退款订单把原佣金重复扣了一次，Total 因此少记。逐单用 "
+         "MercadoPago 现金流水验证过：正常订单里 93%%–97%% 的 Total 与实际到账"
+         "分毫不差，而这些单**每一笔**都正好差一个原佣金。明细见【%s】3.3。"
+         % SHEET_NAMES[9])
     line("D2", "＋ 加回平台代扣代缴税金", V(lambda S: S["m"]["tax_ret"]),
          "预缴给税局的钱，能抵扣就不是成本，所以算利润时要加回来（若不能抵扣，见【%s】敏感性行）" % SHEET_NAMES[1])
     line("D3", "− 退货处理费", V(lambda S: -S["m"]["dev_net"]),
@@ -2441,6 +2447,16 @@ def sheet_returns_money(wb, stores, ctx):
     ws["A2"] = ("一笔退货会同时影响：退给买家的货款、平台退还的佣金与运费、额外的退货处理费、以及库存能否回收。"
                 "下表按订单状态拆开，并标明责任方。单位：MXN")
     ws["A2"].font = F(9, False, C_GREY)
+    n_par = sum(len(S["cn"]["partial"]) for S in stores)
+    if n_par:
+        ws["A3"] = ("⚠ 本页的“实际退款额”直接取自销售报表的 Anulaciones y reembolsos 列，未作修正。"
+                    "其中 %d 笔**部分退款**订单，平台在这一列里把原佣金重复扣了一次，"
+                    "实际退款没有这么多（合计虚高 %s）—— 已用 MercadoPago 现金流水逐单证实。"
+                    "利润口径的修正在【%s】的“加：部分退款重复扣佣金调整”行，"
+                    "逐单明细见【%s】3.3。本页保持与销售报表原始数据一一对应，故不在此处修正。"
+                    % (n_par, fmt(sum(S["cn"]["partial_total"] for S in stores)),
+                       SHEET_NAMES[1], SHEET_NAMES[9]))
+        ws["A3"].font = F(9, False, C_AMBER)
     cols = ["店铺", "订单状态 (Estado)", "中文含义", "单数", "件数", "原销售额", "实际退款额",
             "退款/原销售额", "资金归属", "库存处置"]
     widths = [16, 46, 30, 9, 9, 15, 15, 13, 14, 26]
@@ -3060,6 +3076,15 @@ def sheet_sku(wb, stores, ctx):
                 "五张表**列完全对齐**，同一列永远是同一个项目，可以直接拖着跨表求和；"
                 "明细独有的项放在 Q 列之后，不适用的表留空。")
     ws["A3"].font = F(9, True, C_NAVY)
+    n_par = sum(len(S["cn"]["partial"]) for S in stores)
+    if n_par:
+        ws["A5"] = ("⚠ 本页的“退款金额”取自销售报表原始数据。其中 %d 笔**部分退款**订单，"
+                    "平台在那一列里把原佣金重复扣了一次，所以对应 SKU 的净贡献被低估了"
+                    "相应金额（合计 %s）。本页保持与销售报表一一对应不作修正；"
+                    "利润口径的修正在【%s】，逐单明细见【%s】3.3。"
+                    % (n_par, fmt(sum(S["cn"]["partial_total"] for S in stores)),
+                       SHEET_NAMES[1], SHEET_NAMES[9]))
+        ws["A5"].font = F(9, False, C_AMBER)
     ws["A4"] = ("注 1：佣金与代扣代缴税金已拆成两列 —— 平台在 Ventas 报表里把它们合并给出，"
                 "本页用账单明细的纯佣金逐单还原（见表末说明）。每一列只放一项费用，不再合并。"
                 "注 2：组合订单（Paquete de N productos）的母行金额已按 件数×单价 拆到各子 SKU。"
@@ -4346,7 +4371,11 @@ def build_context(stores, month, build_date=None):
     for S in stores:
         m = S["m"]
         bill = sum(m["bill_fee_net"].values()) + m["unc_bill"]
+        # 必须与 ② 合并损益表的同名行逐项一致。改损益表的行结构时这里也要改 ——
+        # 它是第三处独立算同一个数的地方（另两处是 ② 的公式和 ③ 桥D），
+        # 漏掉任何一处，页面之间就会对不上而没有任何提示。
         contrib[S["store"]] = (m["ing"] + m["env_ing"] - m["coupon"] - m["refund"]
+                               + S["cn"]["partial_total"]
                                - m["com_gross"] - m["env_cost"] - m["dev_net"]
                                - m["unc_order"] - bill)
     return {
