@@ -32,9 +32,11 @@ DOM notes that matter:
 """
 import datetime
 import os
+import calendar
 import time
 
-BILLING_RESUME = "https://vendedores.mercadolibre.com.mx/billing/resume"
+BILLING_BASE = "https://vendedores.mercadolibre.com.mx"
+BILLING_RESUME = BILLING_BASE + "/billing/resume"
 VENTAS_LISTADO = "https://vendedores.mercadolibre.com.mx/ventas/omni/listado"
 SPACE_MANAGEMENT = ("https://vendedores.mercadolibre.com.mx"
                     "/publicaciones/listado/space_management")
@@ -275,49 +277,115 @@ def download_billing_reports(driver, download_dir, months=2, timeout=240,
         period = driver.current_url.rstrip("/").split("/")[-1].split("?")[0]
         print("    明细页：%s" % driver.current_url)
 
-        _open_reports_tab(driver)
-
-        cb = deep_checkbox(driver, "seleccionar todos los reportes")
-        if cb is None:
-            raise RuntimeError("select-all checkbox not found for %s" % month)
-        # The select-all id is React-generated ("«r2»") and changes between
-        # renders, so remember this element's own id rather than pattern
-        # matching it out of the list below.
-        select_all_id = cb.get_attribute("id")
-        if not cb.is_selected():
-            click(driver, cb)
-            time.sleep(2)
-
-        state = driver.execute_script(JS_DEEP_CHECKBOX_STATE)
-        checked = [c["id"] for c in state
-                   if c["checked"] and c["id"] and c["id"] != select_all_id]
-        expected = len(checked)
-        print("    已勾选报表（%d）：%s" % (expected, checked or "（无）"))
-
-        btn = None
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            btn = deep_find(driver, "button.billing-reporting-download__button")
-            if btn is not None and btn.is_enabled():
-                break
-            time.sleep(1)
-        if btn is None or not btn.is_enabled():
-            raise RuntimeError("bulk Descargar never enabled for %s" % month)
-
-        before = snapshot_dir(download_dir)
-        click(driver, btn)
-        print("    已点击 Descargar，等待文件落盘…")
-        files = wait_for_downloads(download_dir, before,
-                                   min_files=max(expected, 1),
-                                   timeout=timeout, label="billing %s" % month)
-        for f in files:
-            print("      + %s" % f)
-        if expected and len(files) != expected:
-            print("    [警告] %s：勾选了 %d 张报表，实际得到 %d 个文件"
-                  % (month, expected, len(files)))
+        files = _download_detail_reports(driver, download_dir, month, timeout)
         results["%s (%s)" % (month, period)] = files
 
     return results
+
+
+SPANISH_MONTH_NAMES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                       "Julio", "Agosto", "Septiembre", "Octubre",
+                       "Noviembre", "Diciembre"]
+
+
+def billing_detail_url(year, month):
+    """某个会计月的账单明细页地址。
+
+    明细页按**账期结束日**寻址，而结束日就是当月最后一天 —— 实测
+    Agosto → 20260831、Septiembre → 20260930、Julio → 20260731 都成立。
+
+    这条路径的意义：resume 页只摆最近 3 期卡片，更早的账期在页面上根本
+    点不到，但明细页本身还在，直接访问就能拿到。做历史月份全靠它。
+    """
+    last = calendar.monthrange(year, month)[1]
+    return "%s/billing/detail/%04d%02d%02d" % (BILLING_BASE, year, month, last)
+
+
+def download_billing_for_period(driver, download_dir, year, month, timeout=240):
+    """下载**指定会计月**的全部账单报表，不管它还在不在 resume 页的卡片里。
+
+    返回 {期间: [文件名]}；该账期不存在或页面打不开时返回 {}（不抛异常 ——
+    历史月份取不到是常态，不该让整个店铺的下载失败）。
+    """
+    url = billing_detail_url(year, month)
+    label = "%s %d" % (SPANISH_MONTH_NAMES[month - 1], year)
+    print("\n--- Facturación %s：直接访问明细页 ---" % label)
+    print("    %s" % url)
+    driver.get(url)
+    time.sleep(9)
+
+    # 页面存在≠是我们要的那一期。用页面自己写的月份名核对，避免平台把
+    # 无效日期悄悄重定向到最近一期、结果把 9 月的账单当成 7 月的存下来。
+    shown = driver.execute_script("""
+        const re = /(Enero|Febrero|Marzo|Abril|Mayo|Junio|Julio|Agosto|Septiembre|Octubre|Noviembre|Diciembre)/i;
+        const m = (document.body.innerText || '').match(re);
+        return m ? m[1] : null;
+    """)
+    want = SPANISH_MONTH_NAMES[month - 1]
+    if shown and shown.lower() != want.lower():
+        print("    [警告] 页面显示的是 %s，不是 %s —— 该账期可能已不可访问，跳过"
+              % (shown, want))
+        return {}
+    if not shown:
+        print("    [警告] 页面没有可识别的月份，跳过")
+        return {}
+
+    period = url.rstrip("/").split("/")[-1]
+    try:
+        files = _download_detail_reports(driver, download_dir, want, timeout)
+    except RuntimeError as e:
+        print("    [警告] %s：%s" % (label, e))
+        return {}
+    return {"%s (%s)" % (want, period): files}
+
+
+def _download_detail_reports(driver, download_dir, month, timeout=240):
+    """已经站在某个账期的明细页上：勾选全部报表并下载。返回文件名列表。
+
+    从 download_billing_reports 里抽出来，好让"按指定账期下载"能走同一段代码 ——
+    两条路径的差别只在怎么到达明细页，页面上的操作完全一样。
+    """
+    _open_reports_tab(driver)
+
+    cb = deep_checkbox(driver, "seleccionar todos los reportes")
+    if cb is None:
+        raise RuntimeError("select-all checkbox not found for %s" % month)
+    # The select-all id is React-generated ("«r2»") and changes between
+    # renders, so remember this element's own id rather than pattern
+    # matching it out of the list below.
+    select_all_id = cb.get_attribute("id")
+    if not cb.is_selected():
+        click(driver, cb)
+        time.sleep(2)
+
+    state = driver.execute_script(JS_DEEP_CHECKBOX_STATE)
+    checked = [c["id"] for c in state
+               if c["checked"] and c["id"] and c["id"] != select_all_id]
+    expected = len(checked)
+    print("    已勾选报表（%d）：%s" % (expected, checked or "（无）"))
+
+    btn = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        btn = deep_find(driver, "button.billing-reporting-download__button")
+        if btn is not None and btn.is_enabled():
+            break
+        time.sleep(1)
+    if btn is None or not btn.is_enabled():
+        raise RuntimeError("bulk Descargar never enabled for %s" % month)
+
+    before = snapshot_dir(download_dir)
+    click(driver, btn)
+    print("    已点击 Descargar，等待文件落盘…")
+    files = wait_for_downloads(download_dir, before,
+                               min_files=max(expected, 1),
+                               timeout=timeout, label="billing %s" % month)
+    for f in files:
+        print("      + %s" % f)
+    if expected and len(files) != expected:
+        print("    [警告] %s：勾选了 %d 张报表，实际得到 %d 个文件"
+              % (month, expected, len(files)))
+    return files
 
 
 # --------------------------------------------------------- 2. Ventas Excel

@@ -13,7 +13,9 @@
 * **绝不抛异常。** 报表没生成不该让已经下载好的文件跟着失败。
 """
 import io
+import glob
 import os
+import re
 import subprocess
 import sys
 import time
@@ -29,6 +31,28 @@ REQUIRED = (
     ("*Ventas_MX*.xlsx", "Ventas"),
     ("Reporte_Facturacion_MercadoLibre_*.xlsx", "账单"),
 )
+
+
+# 账单文件名里的月份缩写。与 report_build.FILE_MONTH_TOKENS 同源；这里单独留一份，
+# 是因为 financial_report 刻意不 import report_build（两者靠子进程相隔，见文件头）。
+FILE_MONTH_TOKENS = {
+    "ene": 1, "enero": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12,
+}
+
+
+def billing_months(folder):
+    """这个目录里有哪几个月的账单。返回 {(年, 月)}。
+
+    账单文件名自带月份（Reporte_Facturacion_MercadoLibre_Ago2026.xlsx），
+    不用打开文件就能知道覆盖了哪几期。
+    """
+    out = set()
+    for f in glob.glob(os.path.join(folder, "Reporte_*.xlsx")):
+        m = re.search(r"_([A-Za-z]{3,5})(\d{4})\.xlsx$", os.path.basename(f))
+        if m and m.group(1).lower() in FILE_MONTH_TOKENS:
+            out.add((int(m.group(2)), FILE_MONTH_TOKENS[m.group(1).lower()]))
+    return out
 
 
 def available():
@@ -58,12 +82,23 @@ def _usable(folder):
     return (not missing), missing
 
 
-def latest_run(store, base=None):
+def latest_run(store, base=None, month=None):
     """这家店最近一个**能用**的下载目录。
 
     返回 (目录, 说明)。没有可用目录时返回 (None, 原因)。
     按时间戳倒序找第一个文件齐全的，而不是无脑取最新 —— 见 REQUIRED 的注释。
+
+    给了 month（"YYYY-MM"）时，**优先**挑账单里确实含那个月的目录。做历史月份
+    报表时这一步是必须的：最新那个目录只有最近两期账单，拿它做 7 月报表，
+    佣金全是 0，代扣税会被算成佣金的好几倍（实测 28%，正常 9%）。
+    找不到含该月账单的目录时退回原来的规则，并在说明里讲清楚。
     """
+    want = None
+    if month:
+        try:
+            want = (int(month[:4]), int(month[5:7]))
+        except Exception:
+            want = None
     base = base or DOWNLOADS
     d = os.path.join(base, store)
     if not os.path.isdir(d):
@@ -73,14 +108,26 @@ def latest_run(store, base=None):
                   reverse=True)
     if not runs:
         return None, "目录下没有任何运行记录"
+    usable = []
     skipped = []
     for r in runs:
         folder = os.path.join(d, r)
         ok, missing = _usable(folder)
         if ok:
-            note = r if not skipped else "%s（跳过 %d 个不完整的更新目录）" % (r, len(skipped))
-            return folder, note
-        skipped.append(r)
+            usable.append((r, folder))
+        else:
+            skipped.append(r)
+
+    if want:
+        for r, folder in usable:
+            if want in billing_months(folder):
+                return folder, "%s（含 %04d-%02d 账单）" % ((r,) + want)
+
+    for r, folder in usable:
+        note = r if not skipped else "%s（跳过 %d 个不完整的更新目录）" % (r, len(skipped))
+        if want:
+            note += "  ⚠ 没有任何目录含 %04d-%02d 的账单，该月费用会缺失" % want
+        return folder, note
     return None, "%d 个目录都缺文件（最新的缺：%s）" % (
         len(runs), "、".join(_usable(os.path.join(d, runs[0]))[1]))
 

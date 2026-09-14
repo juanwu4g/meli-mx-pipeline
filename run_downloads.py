@@ -43,6 +43,9 @@ def add_route_args(ap):
     Shared with run_batch.py so a batch and a single run are configured
     identically; anything specific to one entry point stays in that file.
     """
+    ap.add_argument("--month", default=None, metavar="YYYY-MM",
+                    help="补做某个历史会计月（如 2026-07）。账单改为直接访问该月的"
+                         "明细页，销售窗口自动放大到覆盖该月。不给则按常规下最近的。")
     ap.add_argument("--months", type=int, default=2,
                     help="how many billing periods, newest first")
     ap.add_argument("--skip-current", action="store_true",
@@ -72,6 +75,16 @@ def add_route_args(ap):
                     help="pause between collect cycles, seconds (default 20)")
     ap.add_argument("--skip-ip-check", action="store_true")
     return ap
+
+
+def month_stamp(stamp, args):
+    """补做历史月份的目录加 _mYYYYMM 后缀。
+
+    不加的话，一个只为 7 月拉的目录会混在常规目录里，出 8 月报表时可能被选中
+    —— 而它里面根本没有 8 月的账单。后缀让人和程序都一眼看出这是补做的。
+    """
+    want = month_arg(args)
+    return stamp + ("_m%04d%02d" % want if want else "")
 
 
 def run_folder(store_name, stamp=None, base=None):
@@ -250,6 +263,49 @@ def collect_pending(d, pending, out_dir, result, budget, poll=20):
     return remaining
 
 
+# 销售报表的时间范围菜单只有这几档（实测），必须从里面选，选不到就够不着。
+SALES_WINDOWS = (2, 3, 6)
+
+
+def month_arg(args):
+    """--month 解析成 (年, 月)；没给返回 None。格式不对直接报错，不猜。"""
+    v = getattr(args, "month", None)
+    if not v:
+        return None
+    try:
+        y, m = int(v[:4]), int(v[5:7])
+        if v[4] != "-" or not 1 <= m <= 12:
+            raise ValueError
+    except Exception:
+        raise SystemExit("--month 要写成 YYYY-MM，比如 2026-07；收到的是 %r" % v)
+    return y, m
+
+
+def sales_window(args, today=None):
+    """销售报表要拉几个月，才能盖住目标会计月。
+
+    平台的"最近 N 个月"是从今天往回算的，所以做 7 月报表时，窗口必须长到
+    退回 7 月**月初**。取菜单里能覆盖到的最小档 —— 窗口越大，导出越慢、
+    行数越多，没必要一律拉满。
+    """
+    want = month_arg(args)
+    if not want:
+        return args.period_months
+    today = today or datetime.date.today()
+    y, m = want
+    # 目标月月初距今几个月（向上取整到整月）
+    back = (today.year - y) * 12 + (today.month - m) + 1
+    for w in SALES_WINDOWS:
+        if w >= back:
+            if w != args.period_months:
+                print("  [%s] 销售窗口放大到最近 %d 个月，以覆盖 %04d-%02d"
+                      % ("month", w, y, m))
+            return w
+    print("  [警告] %04d-%02d 距今 %d 个月，超出销售报表菜单最大的 %d 个月，"
+          "该月销售数据可能拉不全" % (y, m, back, SALES_WINDOWS[-1]))
+    return SALES_WINDOWS[-1]
+
+
 def run_store(client, store_name, args, out_dir=None, close_when_done=True,
               defer_slow=False):
     """Open one store, run the requested routes, return what was collected.
@@ -296,7 +352,7 @@ def run_store(client, store_name, args, out_dir=None, close_when_done=True,
         if args.only in ("ventas", "all"):
             _request(result, "ventas/request", pending,
                      meli_forms.request_sales_excel,
-                     d, period_months=args.period_months)
+                     d, period_months=sales_window(args))
         if args.only in ("mercadopago", "all"):
             # every report type under /balance/reports shares one UI
             for kind in mercadopago.REPORTS:
@@ -316,9 +372,18 @@ def run_store(client, store_name, args, out_dir=None, close_when_done=True,
 
         # ---------------- PHASE 2: everything that downloads immediately ------
         if args.only in ("billing", "all"):
-            got = _guard(result, "billing", meli_forms.download_billing_reports,
-                         d, out_dir, months=args.months,
-                         skip_current=args.skip_current)
+            # 指定了历史月份就直接访问那一期的明细页 —— resume 页只摆最近 3 期
+            # 卡片，更早的账期在页面上点不到，但明细页还在。
+            want = month_arg(args)
+            if want:
+                got = _guard(result, "billing",
+                             meli_forms.download_billing_for_period,
+                             d, out_dir, want[0], want[1])
+            else:
+                got = _guard(result, "billing",
+                             meli_forms.download_billing_reports,
+                             d, out_dir, months=args.months,
+                             skip_current=args.skip_current)
             result["billing"] = got if isinstance(got, dict) else {}
         if args.only in ("stock", "all"):
             got = _guard(result, "stock", meli_forms.download_stock_reports,
@@ -484,7 +549,9 @@ def main():
               "要全部下载请用 run_batch.py。"
               % (store_name, len(others), ", ".join(others)))
 
-    out_dir = os.path.abspath(args.out) if args.out else run_folder(store_name)
+    out_dir = (os.path.abspath(args.out) if args.out else
+               run_folder(store_name, month_stamp(
+                   datetime.datetime.now().strftime("%Y%m%d_%H%M%S"), args)))
 
     client = ZiniaoClient()
     client.start(restart=not args.no_restart)

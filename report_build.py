@@ -1039,8 +1039,12 @@ def derive(store, folder, p0, p1):
     S["billing_linked"] = L
 
     def bucket_sum(frame, bucket, reversal=None):
+        # astype(bool) 不能省：frame 为空时 .map() 返回的是 object dtype 的空
+        # Series，pandas 会把它当成**列名列表**而不是布尔掩码，索引出一个零列的
+        # 表，下一行取 f["is_rev"] 就 KeyError。做历史月份时（当月账单里没有
+        # 那个月的订单）必然走到这条路径。
         f = frame[frame["parent_detalle"].map(
-            lambda d: FEE_BY_ES.get(str(d), (None, None, None))[1] == bucket)]
+            lambda d: FEE_BY_ES.get(str(d), (None, None, None))[1] == bucket).astype(bool)]
         if reversal is True:
             f = f[f["is_rev"]]
         elif reversal is False:
@@ -1091,7 +1095,7 @@ def derive(store, folder, p0, p1):
     rev_of_no = FA[FA["is_rev"] & (FA["parent_channel"] == CH_NO)]
     if not len(rev_of_no):   # ID 关联不上时退回按科目性质判断
         rev_of_no = FA[FA["is_rev"] & FA["parent_detalle"].map(
-            lambda d: FEE_BY_ES.get(str(d), (None, None, None))[2] is False)]
+            lambda d: FEE_BY_ES.get(str(d), (None, None, None))[2] is False).astype(bool)]
     m["invoice_internal_reversal"] = float(rev_of_no["amount"].sum())
     m["payable"] = m["bill_by_channel"][CH_NO] + m["invoice_internal_reversal"]
 
@@ -2860,7 +2864,7 @@ def split_commission(S):
     ids.discard(""); ids.discard("nan")
     L = S["billing_linked"]
     com = L[(~L["is_rev"]) & L["parent_detalle"].map(
-        lambda d: FEE_BY_ES.get(str(d), (None, None, None))[1] == "commission")]
+        lambda d: FEE_BY_ES.get(str(d), (None, None, None))[1] == "commission").astype(bool)]
 
     # 账单行 → 订单键。同一行的 k_sale / k_pack 只认能对上 Ventas 的那个，
     # 两个都对不上就放弃这行（它的钱由后面的残差分摊兜住）。
@@ -3394,7 +3398,7 @@ def monthly_commission(S):
     V = V[V["ym"] != "NaT"]
     B = S["billing_all"]
     com = B[(~B["is_rev"]) & B["parent_detalle"].map(
-        lambda d: FEE_BY_ES.get(str(d), (None, None, None))[1] == "commission")]
+        lambda d: FEE_BY_ES.get(str(d), (None, None, None))[1] == "commission").astype(bool)]
     ks_all = com["k_sale"].astype(str).str.strip()
     kp_all = com["k_pack"].astype(str).str.strip()
 

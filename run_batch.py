@@ -287,6 +287,7 @@ def main():
 
     names = resolve_stores(args)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = run_downloads.month_stamp(stamp, args)
 
     stale = pending_store.prune()
     if stale:

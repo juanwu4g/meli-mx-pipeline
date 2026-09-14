@@ -34,11 +34,15 @@ def prev_month(today=None):
     return "%04d-%02d" % (last_prev.year, last_prev.month)
 
 
-def resolve(names):
-    """把店铺名解析成 (名字, 下载目录)，并报告哪些用不了。"""
+def resolve(names, month=None):
+    """把店铺名解析成 (名字, 下载目录)，并报告哪些用不了。
+
+    传 month 是为了让每家店优先用**确实含那个月账单**的目录 —— 做历史月份时
+    最新目录往往只有最近两期账单。
+    """
     usable, unusable = [], []
     for n in names:
-        folder, note = financial_report.latest_run(n)
+        folder, note = financial_report.latest_run(n, month=month)
         if folder:
             usable.append((n, folder))
             print("  %-22s %s" % (n, note))
@@ -74,7 +78,7 @@ def main():
     print("=" * 62)
     print("月度财务报表 —— %s，%d 家店铺" % (month, len(names)))
     print("=" * 62)
-    usable, unusable = resolve(names)
+    usable, unusable = resolve(names, month=month)
 
     if not usable:
         print("\n没有一家店有可用的下载目录，无法生成报表。")
