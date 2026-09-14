@@ -497,6 +497,34 @@ def _first(patterns, folder):
     return None
 
 
+def load_run_meta(folder):
+    """下载时写下的 run_meta.json。老目录没有这个文件，返回 {}。"""
+    p = os.path.join(folder, "run_meta.json")
+    if not os.path.isfile(p):
+        return {}
+    try:
+        with io.open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def sales_window_start(meta):
+    """销售报表这次实际覆盖到多早。信息不全时返回 None。
+
+    平台的"最近 N 个月"是从导出当天往回算的，所以窗口起点 = 导出日 − N 个月。
+    """
+    n = meta.get("sales_window_months")
+    at = meta.get("downloaded_at")
+    if not n or not at:
+        return None
+    try:
+        d = pd.Timestamp(at).normalize()
+    except Exception:
+        return None
+    return d - pd.DateOffset(months=int(n))
+
+
 def load_ventas(folder):
     path = _first(["*Ventas_MX*.xlsx", "*Ventas*.xlsx"], folder)
     if not path:
@@ -1020,7 +1048,8 @@ def credit_note_audit(S, folder):
 
 def derive(store, folder, p0, p1):
     """读一家店一个月的全部原始文件，算出报表需要的每一个数。"""
-    S = {"store": store, "folder": folder, "files": {}, "anomalies": []}
+    S = {"store": store, "folder": folder, "files": {}, "anomalies": [],
+         "p0": p0, "p1": p1, "meta": load_run_meta(folder)}
 
     vpath, V = load_ventas(folder)
     S["files"]["ventas"] = vpath
@@ -1052,6 +1081,9 @@ def derive(store, folder, p0, p1):
         return float(f["amount"].sum())
 
     m = {}
+    vf = V["fecha"].dropna()
+    m["sales_from"] = vf.min() if len(vf) else pd.NaT
+    m["sales_to"] = vf.max() if len(vf) else pd.NaT
     m["rows"] = int(len(A))
     m["orders_unique"] = int(A["oid"].nunique())
     m["units"] = float(num(A, V_UNITS).sum())
@@ -1290,6 +1322,36 @@ def validate(stores, tol=0.05):
             out.append(_chk("mp_settlement", name, "MercadoPago 流水交叉验证", True,
                             "本店没有 settlement 流水（多为该登录账号无报表权限），跳过",
                             severity="warn", skipped=True))
+
+        # ---- 销售报表是否覆盖整个会计月 ----
+        # 销售报表是**滚动窗口**导出：窗口起点晚于月初，这个月就是被截断的。
+        # 桥A 仍然平（它只在导出内部勾稽），所以不单独查就看不出来 ——
+        # 实测 EWTTO_SM 7 月被截到 07-13，GMV 少了 36% 而全部校验照样通过。
+        # 判断依据是**导出时请求的窗口**，不是最早一笔订单的日期 —— 两者
+        # 完全不同：窗口起点晚于月初才是数据被截断；最早订单晚于月初也可能
+        # 只是这家店当月才开张（BOCINA_TA02 就是 7 月 16 号开的）。
+        w0 = sales_window_start(S.get("meta") or {})
+        if w0 is None:
+            out.append(_chk(
+                "sales_window", name, "销售数据覆盖整个会计月", True,
+                "这个下载目录没有 run_meta.json（老目录），无法确认销售窗口是否"
+                "覆盖整月，跳过。重新下载一次即可开始检查。",
+                severity="warn", skipped=True))
+        else:
+            late = (w0 - S["p0"]).days
+            f0 = m.get("sales_from")
+            out.append(_chk(
+                "sales_window", name, "销售数据覆盖整个会计月",
+                late <= 0,
+                ("销售窗口自 %s 起，覆盖了 %s 整月（最早一笔订单 %s）"
+                 % (w0.strftime("%Y-%m-%d"), S["p0"].strftime("%Y-%m"),
+                    f0.strftime("%Y-%m-%d") if f0 is not None and pd.notna(f0) else "—")
+                 if late <= 0 else
+                 "⚠ 销售窗口只回溯到 %s，比 %s 月初晚 %d 天 —— 本月前 %d 天的订单"
+                 "全部缺失，收入、费用、SKU 全部偏低。用 run_batch.py --month %s "
+                 "重新下载（会自动把窗口放大到覆盖整月）再重出。"
+                 % (w0.strftime("%Y-%m-%d"), S["p0"].strftime("%Y-%m"), late,
+                    late, S["p0"].strftime("%Y-%m")))))
 
         # ---- 贷记明细 × 销售报表 逐单交叉比对 ----
         # 这三项都是逐单的，落在其余校验的盲区里：桥A 只在销售报表内部勾稽，

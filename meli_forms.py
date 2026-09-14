@@ -180,8 +180,8 @@ def wait_for_downloads(path, before, min_files=1, timeout=240, settle=12, label=
                 or quiet >= settle * 3):
             return sorted(seen)
     if len(seen) < min_files:
-        print("  [警告] %s：预期至少 %d 个文件，%d 秒后实际 %d 个"
-              % (label or "download", min_files, len(seen), timeout))
+        print("  [警告] %s：预期至少 %d 个文件，等了 %d 秒实际只有 %d 个"
+              % (label or "download", min_files, timeout, len(seen)))
     return sorted(seen)
 
 
@@ -299,6 +299,31 @@ def billing_detail_url(year, month):
     """
     last = calendar.monthrange(year, month)[1]
     return "%s/billing/detail/%04d%02d%02d" % (BILLING_BASE, year, month, last)
+
+
+def download_billing_for_months(driver, download_dir, year, month,
+                                extra=2, timeout=240):
+    """下载目标会计月**以及随后 extra 期**的账单。
+
+    为什么不能只下目标月：订单级费用按**计费日**入账，月末几天的订单，佣金常常
+    落在下一期账单上。实测 EWTTO_SM 的 7 月订单有 56 行费用记在 8/9 月账单里
+    ——只下 7 月的话纯佣金少算 973.23，而代扣税是用「Ventas 合并值 − 纯佣金」
+    倒推的，于是等额虚高，税率从 9.172% 变成 9.221%。
+
+    超出当月的期数会被平台的页面校验挡掉（月份名对不上就跳过），所以这里
+    不必自己算上限。
+    """
+    out = {}
+    y, mo = year, month
+    for i in range(max(1, extra + 1)):
+        got = download_billing_for_period(driver, download_dir, y, mo, timeout)
+        if not got and i > 0:
+            break            # 后续期拿不到很正常（还没到/已关闭），不算失败
+        out.update(got)
+        mo += 1
+        if mo > 12:
+            y, mo = y + 1, 1
+    return out
 
 
 def download_billing_for_period(driver, download_dir, year, month, timeout=240):
@@ -491,6 +516,11 @@ def set_sales_period(driver, months=6, timeout=45):
     return False
 
 
+# 最近一次 request_sales_excel 实际生效的时间范围。用模块级变量而不是改返回值，
+# 是因为返回值的形状被 run_downloads 的 pending 机制约束着，改它要牵动收取逻辑。
+SALES_PERIOD_ACTUAL = {"months": None}
+
+
 def request_sales_excel(driver, period_months=6):
     """PHASE 1 - ask MercadoLibre to build the sales Excel, do not wait.
 
@@ -519,8 +549,16 @@ def request_sales_excel(driver, period_months=6):
 
     # widen the period AFTER clearing the filter - the dropdown re-renders when
     # filters change, and a handle grabbed before that goes stale
+    # 读回**实际**生效的窗口，而不是我们请求的那个。菜单里没有的档位会被
+    # set_sales_period 拒绝并保持原值（实测要 3 拿到的是 2），而这一步失败
+    # 之后导出照样能跑，只是少了一大段数据 —— 不读回来就完全看不出。
     if period_months:
         set_sales_period(driver, months=period_months)
+    actual = driver.execute_script(JS_CURRENT_PERIOD)
+    if period_months and actual != period_months:
+        print("    [警告] 请求 %s 个月，实际生效 %s 个月 —— 导出会少一段数据"
+              % (period_months, actual))
+    SALES_PERIOD_ACTUAL["months"] = actual
 
     btn = None
     deadline = time.time() + 90

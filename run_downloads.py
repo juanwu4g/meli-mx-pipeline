@@ -22,6 +22,8 @@ Files land in ./downloads/<STORE>/<timestamp>/ .
 """
 import argparse
 import datetime
+import io
+import json
 import os
 import sys
 import time
@@ -46,6 +48,9 @@ def add_route_args(ap):
     ap.add_argument("--month", default=None, metavar="YYYY-MM",
                     help="补做某个历史会计月（如 2026-07）。账单改为直接访问该月的"
                          "明细页，销售窗口自动放大到覆盖该月。不给则按常规下最近的。")
+    ap.add_argument("--billing-after", type=int, default=2, metavar="N",
+                    help="配合 --month：目标月之后再多下 N 期账单（默认 2）。"
+                         "月末订单的费用常记在下一期账单上，不下就会少算佣金。")
     ap.add_argument("--months", type=int, default=2,
                     help="how many billing periods, newest first")
     ap.add_argument("--skip-current", action="store_true",
@@ -263,8 +268,13 @@ def collect_pending(d, pending, out_dir, result, budget, poll=20):
     return remaining
 
 
-# 销售报表的时间范围菜单只有这几档（实测），必须从里面选，选不到就够不着。
-SALES_WINDOWS = (2, 3, 6)
+# 销售报表的"最近 N 个月"菜单**只有 2 和 6 两档**。
+# 别加 3 ——实测要 3 的时候 set_sales_period 找不到选项、打一行警告就返回 False，
+# 而调用方不看返回值，于是照样按默认的 2 个月导出：做 7 月报表时窗口停在
+# 07-13，7 月 1-12 日整段丢失，GMV 少了 36%（1,241,893 vs 1,961,431）。
+# 超过 6 个月的目标月这里够不着，菜单里的 Último año / Fecha personalizada
+# 要用 download_history.py 那条路径。
+SALES_WINDOWS = (2, 6)
 
 
 def month_arg(args):
@@ -344,6 +354,11 @@ def run_store(client, store_name, args, out_dir=None, close_when_done=True,
 
         d = session.driver
         meli_forms.set_download_dir(d, out_dir)
+        want0 = month_arg(args)
+        result["month"] = "%04d-%02d" % want0 if want0 else None
+        # 模块级变量，批量跑时会带着上一家店的值进来 —— 这家店若跳过销售
+        # 路线，就会把上一家的窗口错记到这家头上。每家店开跑前清掉。
+        meli_forms.SALES_PERIOD_ACTUAL["months"] = None
 
         # ---------------- PHASE 1: request everything that generates slowly ---
         # These sit in a server-side queue while phase 2 does real work, so the
@@ -377,8 +392,9 @@ def run_store(client, store_name, args, out_dir=None, close_when_done=True,
             want = month_arg(args)
             if want:
                 got = _guard(result, "billing",
-                             meli_forms.download_billing_for_period,
-                             d, out_dir, want[0], want[1])
+                             meli_forms.download_billing_for_months,
+                             d, out_dir, want[0], want[1],
+                             extra=args.billing_after)
             else:
                 got = _guard(result, "billing",
                              meli_forms.download_billing_reports,
@@ -460,10 +476,43 @@ def run_store(client, store_name, args, out_dir=None, close_when_done=True,
 
     # A written record lands beside the files themselves, so the folder still
     # explains itself once the terminal output is gone.
+    result["sales_window_months"] = meli_forms.SALES_PERIOD_ACTUAL.get("months")
+    write_run_meta(out_dir, result, began)
     result["report"] = run_report.write(
         result, args=args,
         started=datetime.datetime.fromtimestamp(began))
     return result
+
+
+def write_run_meta(out_dir, result, began):
+    """往下载目录写一份机器可读的 run_meta.json。
+
+    只放报表端**判断数据完整性**需要的东西。目前就一项：销售报表实际生效的
+    时间范围。没有它就分不清"销售数据只到 7 月 13 号"是窗口不够、还是这家店
+    7 月 13 号才开张 —— 两者在数据里长得一模一样，结论却完全相反。
+    """
+    path = os.path.join(out_dir, "run_meta.json")
+    meta = {}
+    if os.path.isfile(path):          # 合并，不是覆盖
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                meta = json.load(fh) or {}
+        except Exception:
+            meta = {}
+    meta["downloaded_at"] = datetime.datetime.fromtimestamp(began).isoformat(timespec="seconds")
+    meta["month"] = result.get("month")
+    # 这一趟没跑销售路线就别把上一趟记下的窗口抹掉 —— --only billing 补下账单
+    # 到同一目录时会走到这里，覆盖式写入会把 6 改成 null，校验就从"通过"
+    # 变成"跳过"，白白丢掉一条能救命的检查。
+    if result.get("sales_window_months") is not None:
+        meta["sales_window_months"] = result["sales_window_months"]
+    meta.setdefault("sales_window_months", None)
+    try:
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=2)
+    except Exception as e:            # 元数据写不出不该拖垮已经下好的文件
+        print("  [警告] run_meta.json 写入失败：%s" % str(e)[:80])
+    return meta
 
 
 def count_files(result):
