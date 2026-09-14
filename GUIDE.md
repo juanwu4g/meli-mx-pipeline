@@ -1,4 +1,4 @@
-# MX Sales Data — Ziniao Automation Guide
+# meli-mx-pipeline — 运维指南 / Operations Guide
 
 Automating the 紫鸟 (Ziniao) SuperBrowser to pull sales data from MercadoLibre MX
 and other stores.

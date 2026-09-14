@@ -1,4 +1,6 @@
-# MX 销售数据自动化
+# meli-mx-pipeline
+
+**墨西哥 MercadoLibre / MercadoPago 多店铺报表自动化**
 
 用紫鸟（Ziniao）指纹浏览器自动登录墨西哥 MercadoLibre 与 MercadoPago 店铺，
 下载全部报表，清洗成结构化数据，再生成带完整勾稽校验的月度财务报表。
