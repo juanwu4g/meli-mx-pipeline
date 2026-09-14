@@ -1,0 +1,21 @@
+[project]
+name = "mx-sales"
+version = "0.1.0"
+description = "Cleaning and transformation pipeline for MercadoLibre MX seller report downloads."
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "pyarrow>=14.0",
+    "duckdb>=1.0",
+]
+
+[project.scripts]
+mx-sales = "mx_sales.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mx_sales*"]

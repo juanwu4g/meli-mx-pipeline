@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy to config.json and fill in. config.json is gitignored.",
+  "client_path": null,
+  "_client_path": "Path to the ziniao client. null = auto-detect (see bootstrap.py). Windows V6: ziniao.exe, V5: starter.exe. macOS: 'ziniao'. Linux: /opt/ziniao/ziniaobrowser",
+  "client_version": "v6",
+  "_client_version": "v5 or v6 - decides the process name when killing the client (SuperBrowser.exe vs ziniao.exe)",
+  "socket_port": 16851,
+  "_socket_port": "Any free local port. The client listens here for HTTP IPC.",
+  "driver_folder_path": "webdriver",
+  "_driver_folder_path": "Fallback chromedriver dir, relative to the project. Usually unused - each store core ships its own webdriver.exe.",
+  "user_info": {
+    "company": "YOUR_COMPANY",
+    "username": "YOUR_USERNAME",
+    "password": "YOUR_PASSWORD"
+  },
+  "_user_info": "Enterprise login (企业登录). The account needs WebDriver permission enabled in the ziniao console.",
+  "stores": {
+    "default": "BOCINA_SM",
+    "allowed": ["BOCINA_SM"],
+    "batch": []
+  },
+  "_stores": "default = store used when --store is omitted. allowed = the only stores that may be opened; empty list means unrestricted. batch = the stores run_batch.py walks, in order; empty means all of allowed."
+}

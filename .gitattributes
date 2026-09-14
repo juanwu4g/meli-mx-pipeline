@@ -1,0 +1,9 @@
+# 仓库内统一 LF，检出时按平台还原。
+# 不加这条的话，Windows 上 clone 完整个仓库会显示成"全部被修改"。
+* text=auto eol=lf
+
+# 二进制，别做行尾转换也别做 diff
+*.xlsx binary
+*.zip  binary
+*.parquet binary
+*.duckdb binary

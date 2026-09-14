@@ -1,0 +1,20 @@
+# Ziniao (紫鸟) browser automation - runtime dependencies
+# Install:  python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
+#
+# Versions below are the ones verified working on 2026-08-28 against
+# ziniao client 6.27.1 / store core Chromium 146.1.4.66.
+
+requests==2.32.2      # HTTP IPC with the ziniao client (127.0.0.1:<port>)
+selenium==4.48.0      # attaches to the store browser via debuggerAddress
+
+# --- analysis (ANALYSIS_GUIDE.md) ---
+pandas==3.0.5         # aggregation for both analysis methods
+openpyxl==3.1.5       # reading the .xlsx exports
+XlsxWriter==3.2.9     # writing the method-1 report workbook
+
+# --- downstream transform (downloads/mx_sales, see downloads/README.md) ---
+# run_batch.py shells out to `python -m mx_sales build` using THIS
+# interpreter, so its two extra dependencies live here rather than in a second
+# environment.
+pyarrow==25.0.1       # Parquet output under downloads/data/processed/
+duckdb==1.5.5         # views over that output (downloads/data/mx_sales.duckdb)
