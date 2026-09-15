@@ -545,7 +545,12 @@ def load_ventas(folder):
         raise IOError("找不到 Ventas 报表：%s" % folder)
     df = pd.read_excel(path, sheet_name=VENTAS_SHEET, header=VENTAS_HEADER_ROW)
     df["fecha"] = df[V_DATE].map(parse_spanish_date) if V_DATE in df.columns else pd.NaT
-    df["ym"] = df["fecha"].dt.to_period("M").astype(str)
+    # pandas 2 的 astype(str) 把 NaT 变成字面量 "NaT"，pandas 3 让它保持 NaN。
+    # 本文件有 5 处 `ym != "NaT"` 的过滤依赖那个字面量（3613/3669/4492 等），
+    # NaN 一律穿过去，最后在 sorted() 里拿 float 和 str 比大小炸掉。这里把
+    # "NaT" 填回去，恢复其余代码一直假设的不变量。
+    per = df["fecha"].dt.to_period("M")
+    df["ym"] = per.astype(str).where(per.notna(), "NaT")
     df["oid"] = idkey(df[V_ORDER_ID]) if V_ORDER_ID in df.columns else ""
     df["pid"] = idkey(df[V_PACK_ID]) if V_PACK_ID in df.columns else ""
     st = df[V_STATUS].astype(str) if V_STATUS in df.columns else pd.Series("", index=df.index)
@@ -4487,7 +4492,10 @@ def sheet_gaps(wb, stores, ctx):
 def build_context(stores, month, build_date=None):
     p0, p1 = month_bounds(month)
     cutoffs = [S["ventas_all"]["fecha"].max() for S in stores if len(S["ventas_all"])]
-    cutoff = max([c for c in cutoffs if pd.notna(c)]) if cutoffs else p1
+    # 守卫看的必须是**过滤之后**的列表。原来判断的是过滤前的 cutoffs 非空，
+    # 可一家店的销售日期要是全为 NaT（导出缺日期列），过滤后就空了，max() 直接炸。
+    cutoffs = [c for c in cutoffs if pd.notna(c)]
+    cutoff = max(cutoffs) if cutoffs else p1
     # 不完整月份：销售报表窗口两端（最早月与最晚月），且不等于报表月本身时才提示
     months = sorted(set(m for S in stores for m in S["ventas_all"]["ym"].unique() if m != "NaT"))
     partial = set()
@@ -4632,13 +4640,34 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     p0, p1 = month_bounds(a.month)
-    stores = []
+    stores, unusable = [], []
     for name, path in a.store:
         print("[读取] %s ← %s" % (name, path))
-        stores.append(derive(name, path, p0, p1))
+        S = derive(name, path, p0, p1)
+        V = S["ventas_all"]
+        # Ventas 导出偶尔整列缺销售日期（平台换了导出模板，或者文件本身是坏的）。
+        # 没有日期就没有会计期间，这家店的所有口径都无从谈起。以前这种数据要一路
+        # 走到 build_context 才炸 —— 而且是在**汇总**阶段炸，一家店的坏文件把另外
+        # 11 家的汇总表一起带走。就地剔除，并在 ⑩ 页记一条未通过的校验。
+        if len(V) and not V["fecha"].notna().any():
+            unusable.append((name, "Ventas 报表没有一行带销售日期，多半是导出缺少"
+                                   "日期列或文件损坏。本店已从本报表剔除，"
+                                   "请重新下载这家店的 Ventas 再出一次。"))
+            continue
+        stores.append(S)
+
+    for name, why in unusable:
+        print("[剔除] %s —— %s" % (name, why))
+    if not stores:
+        print("\n[中止] 没有一家店铺的数据可用。")
+        return 2
 
     ctx = build_context(stores, a.month, a.build_date)
     checks = validate(stores, tol=a.tol)
+    # 排在最前面：被剔除的店铺不会出现在下面任何一条校验里，不显式记一笔的话，
+    # 汇总表只会写“11 家店铺”，没人会注意到少了一家。
+    checks = [_chk("store_usable", name, "店铺数据可用", False, why)
+              for name, why in unusable] + checks
     ctx["checks"] = checks
 
     print("\n[校验]")
