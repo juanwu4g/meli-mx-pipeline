@@ -23,6 +23,8 @@
   同时点两次"下载"，第二次会把第一次杀掉。
 """
 import datetime
+import io
+import json
 import os
 import queue
 import subprocess
@@ -30,10 +32,33 @@ import sys
 import threading
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-REPORT_DIR = os.path.join(ROOT, "downloads", "data", "reports", "financial")
+DEFAULT_REPORT_DIR = os.path.join(ROOT, "downloads", "data", "reports", "financial")
+SETTINGS = os.path.join(ROOT, "gui_settings.json")
+
+
+def load_settings():
+    """界面自己的偏好（目前只有输出目录）。
+
+    刻意不写进 config.json —— 那个文件装凭据和店铺白名单，是照着
+    config.example.json 填出来的；把界面偏好混进去，新人对着范本填的时候
+    会多出不认识的键。这份坏了删掉即可，不影响任何业务。
+    """
+    try:
+        with io.open(SETTINGS, encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def save_settings(d):
+    try:
+        with io.open(SETTINGS, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass                      # 存不下偏好不该妨碍干活
 
 
 def interpreter():
@@ -122,6 +147,36 @@ class App(object):
                 % len(self.stores))
         ttk.Label(box, text=hint, foreground="#666", justify="left").pack(
             side="left", anchor="n", padx=12, pady=(4, 0))
+
+        ttk.Label(f, text="报表输出到").grid(row=2, column=0, sticky="w",
+                                        pady=(12, 0))
+        self.outdir = tk.StringVar(
+            value=load_settings().get("out_dir") or DEFAULT_REPORT_DIR)
+        ttk.Entry(f, textvariable=self.outdir, width=62).grid(
+            row=2, column=1, columnspan=2, sticky="w", padx=(6, 6), pady=(12, 0))
+        ttk.Button(f, text="浏览…", command=self._pick_outdir, width=8).grid(
+            row=2, column=3, sticky="w", pady=(12, 0))
+        ttk.Button(f, text="恢复默认", command=self._reset_outdir, width=10).grid(
+            row=2, column=4, sticky="w", padx=(6, 0), pady=(12, 0))
+        ttk.Label(f, text="可以直接指向共享盘，财务就不用等人拷贝。目录不存在会自动建。",
+                  foreground="#666").grid(row=3, column=1, columnspan=4,
+                                          sticky="w", pady=(2, 0))
+
+    def _pick_outdir(self):
+        d = filedialog.askdirectory(title="选择报表输出目录",
+                                    initialdir=self.outdir.get() or ROOT)
+        if d:
+            self.outdir.set(os.path.normpath(d))
+            save_settings(dict(load_settings(), out_dir=self.outdir.get()))
+
+    def _reset_outdir(self):
+        self.outdir.set(DEFAULT_REPORT_DIR)
+        save_settings(dict(load_settings(), out_dir=DEFAULT_REPORT_DIR))
+
+    def _args_outdir(self):
+        d = (self.outdir.get() or "").strip()
+        return ["--out-dir", d] if d and os.path.normpath(d) != os.path.normpath(
+            DEFAULT_REPORT_DIR) else []
 
     def _toggle_stores(self):
         self.lb.configure(state="disabled" if self.all_stores.get() else "normal")
@@ -225,7 +280,8 @@ class App(object):
 
     def do_reports(self):
         self.run(["run_reports.py", "--month", self.month.get()]
-                 + self._args_stores() + self._args_combined(), "出报表")
+                 + self._args_stores() + self._args_combined()
+                 + self._args_outdir(), "出报表")
 
     def do_dry_run(self):
         self.run(["run_reports.py", "--month", self.month.get(), "--dry-run"]
@@ -245,14 +301,15 @@ class App(object):
         self.run(["run_batch.py", "--collect-only"], "补取欠的报表")
 
     def do_open_dir(self):
-        if not os.path.isdir(REPORT_DIR):
+        d = (self.outdir.get() or "").strip() or DEFAULT_REPORT_DIR
+        if not os.path.isdir(d):
             messagebox.showinfo("还没有报表",
-                                "目录还不存在：\n%s\n\n先点“出报表”。" % REPORT_DIR)
+                                "目录还不存在：\n%s\n\n先点“出报表”。" % d)
             return
         if os.name == "nt":
-            os.startfile(REPORT_DIR)          # noqa: S606
+            os.startfile(d)                   # noqa: S606
         else:
-            subprocess.Popen(["xdg-open", REPORT_DIR])
+            subprocess.Popen(["xdg-open", d])
 
     def run(self, argv, title):
         if self.proc is not None:
@@ -336,6 +393,8 @@ class App(object):
         self.stop_btn.configure(state="normal" if running else "disabled")
 
     def _on_close(self):
+        # 手输（而非"浏览…"选）的目录也记下来
+        save_settings(dict(load_settings(), out_dir=self.outdir.get()))
         if self.proc is not None and not messagebox.askokcancel(
                 "还在运行", "任务还在跑，关掉窗口会一起结束。确定？"):
             return
