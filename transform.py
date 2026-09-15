@@ -64,11 +64,14 @@ def _echo(out):
 def _invoke(subcmd, label, timeout, echo):
     """Run one `python -m mx_sales <subcmd>` and describe what happened.
 
-    Returns a dict: ok / skipped / returncode / seconds / output.
+    Returns a dict: ok / partial / skipped / returncode / seconds / output.
+    `partial` means some files failed and the rest were written - a state the
+    caller must not report as "failed".
     Never raises - the downloads are already on disk and safe either way.
     """
     if not available():
-        return {"ok": True, "skipped": "downloads/ 下没有 mx_sales 包",
+        return {"ok": True, "partial": False,
+                "skipped": "downloads/ 下没有 mx_sales 包",
                 "returncode": None, "seconds": 0, "output": ""}
 
     # sys.executable, so the transform runs in the same venv as the downloader.
@@ -88,22 +91,31 @@ def _invoke(subcmd, label, timeout, echo):
                            encoding="utf-8", errors="replace")
         out, rc = p.stdout or "", p.returncode
     except subprocess.TimeoutExpired:
-        return {"ok": False, "skipped": None, "returncode": None,
-                "seconds": int(time.time() - began),
+        return {"ok": False, "partial": False, "skipped": None,
+                "returncode": None, "seconds": int(time.time() - began),
                 "output": "超时（%d 秒）" % timeout}
     except Exception as e:
-        return {"ok": False, "skipped": None, "returncode": None,
-                "seconds": int(time.time() - began),
+        return {"ok": False, "partial": False, "skipped": None,
+                "returncode": None, "seconds": int(time.time() - began),
                 "output": "%s: %s" % (e.__class__.__name__, e)}
 
     secs = int(time.time() - began)
     if echo and out.strip():
         _echo(out)
-    print("    %s %s，用时 %d 分 %02d 秒"
-          % (label, "成功" if rc == 0 else "失败（退出码 %d）" % rc,
-             secs // 60, secs % 60))
-    return {"ok": rc == 0, "skipped": None, "returncode": rc,
-            "seconds": secs, "output": out[-4000:]}
+    # build 的退出码是三档的（见 downloads/mx_sales/__main__.py 的说明）：
+    # 0 全部成功 / 1 部分文件失败但其余已写入 / 2 什么都没产出。以前这里只分
+    # 零与非零，于是 55 个文件里坏 1 个也被一路报成"清洗失败"，读的人会以为
+    # 整批数据都没清洗。validate 的 1 是别的意思，所以只认 build。
+    partial = rc == 1 and bool(subcmd) and subcmd[0] == "build"
+    if rc == 0:
+        state = "成功"
+    elif partial:
+        state = "部分文件失败（其余已写入）"
+    else:
+        state = "失败（退出码 %d）" % rc
+    print("    %s %s，用时 %d 分 %02d 秒" % (label, state, secs // 60, secs % 60))
+    return {"ok": rc == 0, "partial": partial, "skipped": None,
+            "returncode": rc, "seconds": secs, "output": out[-4000:]}
 
 
 def build(args=(), timeout=3600, echo=True):

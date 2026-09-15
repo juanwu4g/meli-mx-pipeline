@@ -455,8 +455,12 @@ def main():
     if tr is not None:
         if tr.get("skipped"):
             print("  清洗            已跳过（%s）" % tr["skipped"])
+        elif tr["ok"]:
+            print("  清洗            成功")
+        elif tr.get("partial"):
+            print("  清洗            部分文件失败，其余已写入")
         else:
-            print("  清洗            %s" % ("成功" if tr["ok"] else "失败"))
+            print("  清洗            失败")
 
     bad = [r for r in rows if r["status"] != "ok"]
     if bad:
@@ -464,8 +468,14 @@ def main():
         return 1
     if tr is not None and not tr["ok"]:
         # The downloads succeeded; only the transform did not. Worth a non-zero
-        # exit so a scheduled run does not look clean, but say which half broke.
-        print("  所有店铺下载成功，但清洗失败")
+        # exit so a scheduled run does not look clean, but say which half broke
+        # - and how much of it. "清洗失败" for 1 bad file out of 55 reads as if
+        # nothing was cleaned, which sends people looking in the wrong place.
+        if tr.get("partial"):
+            print("  所有店铺下载成功；清洗有文件未通过，其余已写入 —— "
+                  "上面的 ERROR 行写了是哪个文件")
+        else:
+            print("  所有店铺下载成功，但清洗失败")
         return 1
     print("  全部 %d 家店铺正常" % len(rows))
     return 0

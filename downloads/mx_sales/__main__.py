@@ -6,6 +6,18 @@ Commands
 ``build``     clean the raw downloads to Parquet and refresh the DuckDB views
 ``query``     run SQL against the warehouse
 ``validate``  apply the Ventas MX validation rules to one export
+
+Exit codes
+----------
+``0``  everything processed
+``1``  some files failed; the rest were written and the warehouse refreshed
+``2``  nothing usable -- every file failed, or none matched a report type
+
+1 and 2 are kept apart on purpose. ``pipeline.run`` already isolates a bad
+export ("one bad export must not sink the run"), but this used to collapse any
+error into a single non-zero code, so a caller had no way to tell 1 bad file out
+of 55 from a run that produced nothing -- and reported both as "cleaning
+failed".
 """
 
 from __future__ import annotations
@@ -13,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import traceback
 from pathlib import Path
 
 import pandas as pd
@@ -60,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "validate":
         return _validate(args.file, args.excel)
-    return 1
+    return 2          # unreachable (subparsers are required); never borrow 1
 
 
 def _discover(show_unmatched: bool) -> int:
@@ -92,20 +105,33 @@ def _build(report: str | None, only: str | None, *, warehouse_refresh: bool) -> 
     results = pipeline.run(report, only=only)
     if not results:
         print("nothing to do: no raw files matched a registered report")
-        return 1
+        return 2
 
-    failed = False
+    # `files` counts only the files that made it through -- pipeline.run skips a
+    # failed one before incrementing -- so errors and files never double count.
+    written = sum(result.files for result in results)
+    failed = sum(len(result.errors) for result in results)
+
     for result in results:
-        print(f"{result.report}: {result.rows} rows from {result.files} file(s) -> {result.output}")
+        note = f", {len(result.errors)} FAILED" if result.errors else ""
+        print(f"{result.report}: {result.rows} rows from {result.files} file(s)"
+              f"{note} -> {result.output}")
         for error in result.errors:
-            failed = True
             print(f"  ERROR {error}")
 
     if warehouse_refresh:
         views = warehouse.refresh_views()
         print(f"warehouse: {SETTINGS.warehouse_path} (views: {', '.join(views) or 'none'})")
 
-    return 1 if failed else 0
+    if not failed:
+        return 0
+    total = written + failed
+    if written:
+        print(f"{failed} of {total} file(s) failed to clean; the other {written} "
+              f"were written and the warehouse was refreshed")
+        return 1
+    print(f"all {total} file(s) failed to clean; nothing was written")
+    return 2
 
 
 def _validate(file: str, excel: Path | None) -> int:
@@ -136,4 +162,15 @@ def _validate(file: str, excel: Path | None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        # 1 now means exactly one thing -- "some files failed, the rest were
+        # written" -- and callers key off that. An unhandled crash (a bad
+        # --file, an unreadable warehouse) must not borrow that code, or a total
+        # failure gets reported as a partial one. Traceback still printed: this
+        # widens the exit code, it does not hide the error.
+        traceback.print_exc()
+        sys.exit(2)
