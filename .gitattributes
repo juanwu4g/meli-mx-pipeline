@@ -2,6 +2,12 @@
 # 不加这条的话，Windows 上 clone 完整个仓库会显示成"全部被修改"。
 * text=auto eol=lf
 
+# 批处理必须是 CRLF。上面那条会把它normalize成 LF，而 .cmd 里的 if( ) 块
+# 在部分 Windows 上遇到 LF 行尾会解析异常 —— 而且这是给不懂命令行的人
+# 双击用的文件，坏了没人看得懂为什么。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
 # 二进制，别做行尾转换也别做 diff
 *.xlsx binary
 *.zip  binary
