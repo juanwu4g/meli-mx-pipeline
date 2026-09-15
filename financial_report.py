@@ -13,6 +13,8 @@
 * **绝不抛异常。** 报表没生成不该让已经下载好的文件跟着失败。
 """
 import io
+import json
+import datetime
 import glob
 import os
 import re
@@ -39,6 +41,74 @@ FILE_MONTH_TOKENS = {
     "ene": 1, "enero": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
     "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12,
 }
+
+
+def sales_span(folder):
+    """这个目录的销售报表覆盖到多早。返回 pd 可比的 (最早, 最晚) 字符串 YYYY-MM。
+
+    只读文件名解决不了 —— 销售报表的文件名里只有导出日期，没有窗口。所以读
+    run_meta.json 里记下的实际窗口；老目录没有这个文件时返回 None，宁可不判断
+    也不猜。
+    """
+    meta_path = os.path.join(folder, "run_meta.json")
+    if not os.path.isfile(meta_path):
+        return None
+    try:
+        with io.open(meta_path, encoding="utf-8") as fh:
+            meta = json.load(fh) or {}
+        n, at = meta.get("sales_window_months"), meta.get("downloaded_at")
+        if not n or not at:
+            return None
+        d = datetime.date(int(at[:4]), int(at[5:7]), int(at[8:10]))
+    except Exception:
+        return None
+    y, m = d.year, d.month - int(n)
+    while m <= 0:
+        y, m = y - 1, m + 12
+    return "%04d-%02d" % (y, m), "%04d-%02d" % (d.year, d.month)
+
+
+def sales_reaches(folder, month):
+    """这个目录的销售数据**确实**含有早于 month 月初的订单吗？
+
+    run_meta.json 给的是请求的窗口，最准，但老目录没有。退而求其次直接翻文件：
+    只要里面存在早于目标月月初的订单，就**证明**窗口盖过了这个月 —— 这是证据，
+    不是推测。反过来不成立（没有更早的订单也可能只是这家店当月才开张），所以
+    这个函数只用来**肯定**，不用来否定。
+
+    读 xlsx 有代价，所以只在账单匹配失败后才调用。
+    """
+    span = sales_span(folder)
+    if span:
+        return span[0] <= month <= span[1]
+    hits = (sorted(glob.glob(os.path.join(folder, "*Ventas_MX*.xlsx")))
+            or sorted(glob.glob(os.path.join(folder, "*Ventas*.xlsx"))))
+    if not hits:
+        return False
+    p = hits[0]
+    try:
+        import pandas as pd
+        d = pd.read_excel(p, sheet_name=0, header=5, usecols=[1])
+        col = d.columns[0]
+        first = min((_spanish_year_month(v) for v in d[col] if isinstance(v, str)),
+                    default=None)
+        return bool(first and first < month)
+    except Exception:
+        return False
+
+
+_ES_MONTHS = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5,
+              "junio": 6, "julio": 7, "agosto": 8, "septiembre": 9,
+              "octubre": 10, "noviembre": 11, "diciembre": 12}
+
+
+def _spanish_year_month(v):
+    """'3 de agosto de 2026 09:24 hs.' -> '2026-08'；认不出返回 None。"""
+    m = re.match(r"\s*\d{1,2}\s+de\s+([A-Za-zÁ-úá-ú]+)\s+de\s+(\d{4})", v)
+    if not m:
+        return None
+    mo = _ES_MONTHS.get(m.group(1).lower())
+    return "%s-%02d" % (m.group(2), mo) if mo else None
 
 
 def billing_months(folder):
@@ -119,14 +189,27 @@ def latest_run(store, base=None, month=None):
             skipped.append(r)
 
     if want:
+        wm = "%04d-%02d" % want
+        # 第一优先：确实含该月账单的目录。没有账单，费用侧整块是空的。
         for r, folder in usable:
             if want in billing_months(folder):
-                return folder, "%s（含 %04d-%02d 账单）" % ((r,) + want)
+                return folder, "%s（含 %s 账单）" % (r, wm)
+        # 第二优先：账单没有，但销售窗口盖得住该月的目录。这样至少收入侧是对的，
+        # 总比退回最新目录（两头都缺）强。必须把"为什么选它、还缺什么"写进说明 ——
+        # 选了一个不完美的目录而不告诉人，比直接失败更糟。
+        for r, folder in usable:
+            if sales_reaches(folder, wm):
+                span = sales_span(folder)
+                how = ("销售窗口 %s~%s" % span) if span else "销售数据含更早的订单"
+                return folder, ("%s（⚠ 无 %s 账单，但%s，盖得住该月："
+                                "收入可用，平台费用会缺失，代扣税率会失真）"
+                                % (r, wm, how))
 
     for r, folder in usable:
         note = r if not skipped else "%s（跳过 %d 个不完整的更新目录）" % (r, len(skipped))
         if want:
-            note += "  ⚠ 没有任何目录含 %04d-%02d 的账单，该月费用会缺失" % want
+            note += ("  ⚠ 没有任何目录含 %s 的账单，也没有目录的销售窗口盖得住该月 —— "
+                     "这份报表的收入和费用都会缺失，仅供参考" % wm)
         return folder, note
     return None, "%d 个目录都缺文件（最新的缺：%s）" % (
         len(runs), "、".join(_usable(os.path.join(d, runs[0]))[1]))

@@ -1323,6 +1323,24 @@ def validate(stores, tol=0.05):
                             "本店没有 settlement 流水（多为该登录账号无报表权限），跳过",
                             severity="warn", skipped=True))
 
+        # ---- 本期账单是否存在 ----
+        # 放在最前面：账单整块缺失会让后面一串校验一起失真（代扣税率会变成
+        # 0% 或几十个百分点、桥B 和 Full 核对直接跳过），但那些都是**症状**。
+        # 没有这一条，人只能从症状倒推病因。
+        n_bill = len(S["billing"])
+        out.append(_chk(
+            "billing_present", name, "本期账单已下载",
+            n_bill > 0,
+            ("本期账单 %d 行，计费日落在 %s 内" % (n_bill, S["p0"].strftime("%Y-%m"))
+             if n_bill else
+             "⚠ 这个下载目录里**没有 %s 的账单**（目录里的账单是 %s）。"
+             "平台费用、佣金、代扣税全部缺失，后面几条校验的异常都是这一条的连带结果。"
+             "用 run_batch.py --month %s 重新下载该月账单再重出。"
+             % (S["p0"].strftime("%Y-%m"),
+                "、".join(sorted({d.strftime("%Y-%m") for d in S["billing_all"]["cdate"]
+                                  if pd.notna(d)})) or "（一份都没有）",
+                S["p0"].strftime("%Y-%m")))))
+
         # ---- 销售报表是否覆盖整个会计月 ----
         # 销售报表是**滚动窗口**导出：窗口起点晚于月初，这个月就是被截断的。
         # 桥A 仍然平（它只在导出内部勾稽），所以不单独查就看不出来 ——
