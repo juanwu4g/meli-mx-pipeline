@@ -255,23 +255,76 @@ class ZiniaoClient(object):
                 return b
         raise ZiniaoError("store %r not found on this account" % name)
 
-    def _resolve_driver(self, info):
+    DRIVER_WAIT = 600          # 内核首次下载可能要几分钟，给足
+    DRIVER_SETTLE = 4          # 文件大小连续这么久不变，才认为下完了
+
+    def _resolve_driver(self, info, wait=None):
+        """找这个店铺内核对应的 webdriver。内核还在下就等它。
+
+        首选店铺内核自带的 webdriver.exe，其次是 driver_folder 里的备用驱动。
+
+        **必须等，不能一次查找就放弃。** 紫鸟在一台从没跑过的机器上要先下载
+        店铺内核，而 startBrowser 会在内核还没落盘时就返回 —— 立刻去找
+        webdriver.exe 必然找不到。老实现就是这么抛错的，结果是新机器第一次
+        跑必然失败，而错误信息（"no chromedriver, run bootstrap --drivers"）
+        还把人引向下载 300 MB 备用驱动这条错路。
+
+        找到之后还要等文件大小稳定：下到一半的 webdriver.exe 比没有更糟 ——
+        Selenium 会以一个看不懂的错误崩掉，而不是说"文件不完整"。
+        """
+        wait = self.DRIVER_WAIT if wait is None else wait
         bpath = info.get("browserPath") or ""
         if bpath.lower().endswith(("superbrowser.exe", "superbrowser")):
             bpath = os.path.dirname(bpath)
+        cands = []
         if bpath:
-            name = "webdriver.exe" if IS_WIN else "webdriver"
-            p = os.path.join(bpath, name)
-            if os.path.exists(p):
-                return p
+            cands.append(os.path.join(bpath, "webdriver.exe" if IS_WIN else "webdriver"))
         major = str(info.get("core_version", "")).split(".")[0]
-        name = "chromedriver%s%s" % (major, ".exe" if IS_WIN else "")
-        p = os.path.join(self.driver_folder, name)
-        if os.path.exists(p):
-            return p
+        if major:
+            cands.append(os.path.join(
+                self.driver_folder,
+                "chromedriver%s%s" % (major, ".exe" if IS_WIN else "")))
+
+        # 第一轮只看存在不存在，不做 settle 检查：调用前就已经在的文件，
+        # 不可能正在下载。每家店白等 4 秒 × 12 家 = 每批白等 48 秒。
+        deadline = time.time() + wait
+        told = False
+        first = True
+        while True:
+            for p in cands:
+                if os.path.exists(p) and (first or self._file_settled(p)):
+                    if told:
+                        print("      内核就绪：%s" % p)
+                    return p
+            first = False
+            if time.time() >= deadline:
+                break
+            if not told:
+                print("    内核 %s 尚未就绪，等待紫鸟下载/更新（最多 %d 秒）…"
+                      % (info.get("core_version") or "?", wait))
+                print("      这在从未跑过紫鸟的机器上是正常的，只发生一次。")
+                told = True
+            time.sleep(5)
+
         raise ZiniaoError(
-            "no chromedriver for core %s; run: python bootstrap.py --drivers"
-            % info.get("core_version"))
+            "等了 %d 秒，店铺内核 %s 的 webdriver 仍未出现。找过：%s\n"
+            "  如果这是新机器第一次跑：先手动打开紫鸟客户端、进一次这家店，"
+            "让它把内核下完，再跑本脚本。\n"
+            "  如果内核目录里确实没有 webdriver.exe（紫鸟安装不完整），"
+            "用 python bootstrap.py --drivers 下载备用驱动。"
+            % (wait, info.get("core_version"), "、".join(cands) or "（无候选路径）"))
+
+    def _file_settled(self, path, settle=None):
+        """文件大小在 settle 秒内没变化，且不为 0 —— 认为下载完成。"""
+        settle = self.DRIVER_SETTLE if settle is None else settle
+        try:
+            a = os.path.getsize(path)
+            if a == 0:
+                return False
+            time.sleep(settle)
+            return os.path.getsize(path) == a
+        except OSError:
+            return False
 
     @contextmanager
     def open_store(self, store, headless=False, close_when_done=True):
