@@ -428,13 +428,21 @@ logs/pending.json                            还欠着的报表 → 用 --collec
 
 ### ② Python 用错了
 
-机器上同时有 conda 的 `(base)` 环境。直接敲 `python` 可能用到 conda 那个，
-**它没装 `pyarrow` 和 `duckdb`，清洗会失败**。永远写全路径：
+机器上可能同时装着别的 Python（conda 的 `(base)` 之类）。直接敲 `python`
+会用到哪个说不准，而**不同环境的库版本不同**。永远写全路径：
 
 ```bat
 .venv\Scripts\python ...          在根目录
 ..\.venv\Scripts\python ...       在 downloads/ 目录
 ```
+
+这不是洁癖。`requirements.txt` 锁的是 **pandas 3.0.5**，而 conda 环境里常见的是
+pandas 2.x —— 两者对 `astype(str)` 遇到 NaN 的处理**不一样**（2.x 转成字面量
+`"nan"`，3.x 保留 NaN）。曾经因为在 pandas 2 上开发、在 pandas 3 上运行，
+⑨ 库存页直接崩在 `int(NaN)` 上。
+
+现在两个版本的输出已做过**逐单元格比对，13 份报表差异为 0**，但前提是用
+`.venv` 里的解释器。验收新机器时也必须用它。
 
 ### ③ `allowed` 是"权限清单"，不是"任务清单"
 

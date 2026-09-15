@@ -497,6 +497,20 @@ def _first(patterns, folder):
     return None
 
 
+def cell_int(v):
+    """写进单元格：浮点取整，NaN/None 留空。
+
+    直接 int(v) 会在 NaN 上抛 ValueError。这不是假想 —— pandas 3 的
+    astype(str) 不再把 NaN 变成 "nan"，于是一个本该是空字符串的状态列
+    漏成了 NaN，写表时整个报表崩掉。空值就该留空，不该让它伪装成 0。
+    """
+    if v is None:
+        return None
+    if isinstance(v, float):
+        return None if pd.isna(v) else int(v)
+    return v
+
+
 def load_run_meta(folder):
     """下载时写下的 run_meta.json。老目录没有这个文件，返回 {}。"""
     p = os.path.join(folder, "run_meta.json")
@@ -785,8 +799,11 @@ def load_stock(folder):
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0) if c in out.columns \
             else 0.0
     for c in ("sku", "title", "estado", "runout", "urgency", "full", "ml"):
-        out[c] = out[c].astype(str).str.strip() if c in out.columns else ""
-        # 未上架的商品这些列是空的，pandas 转成字符串会写出 "nan" 摆在表里
+        # 先 fillna 再 astype。pandas 2 的 astype(str) 把 NaN 变成字面量 "nan"，
+        # pandas 3 则**保留 NaN** —— 只靠 replace({"nan": ""}) 在 pandas 3 下
+        # 完全不起作用，NaN 会一路漏到写单元格时 int(NaN) 炸掉。
+        out[c] = (out[c].fillna("").astype(str).str.strip()
+                  if c in out.columns else "")
         out[c] = out[c].replace({"nan": "", "NaT": "", "None": ""})
     out["total_u"] = (out["in_transit"] + out["transfer"] + out["returned"]
                       + out["sellable"] + out["unsellable"] + out["lost"]
@@ -3970,7 +3987,7 @@ def sheet_inventory(wb, stores, ctx):
                 ST["sales30_u"].sum(), ours, ours - ST["sales30_u"].sum(),
                 ST["avg_stock"].sum()]
         for i, v in enumerate(vals, 1):
-            c = ws.cell(row=r, column=i, value=(int(v) if isinstance(v, float) else v))
+            c = ws.cell(row=r, column=i, value=cell_int(v))
             if i >= 3:
                 c.number_format = INT
         # 周转天数 = 平均库存 ÷ 日均销量。销量为 0 时不写 0 —— 0 天会被读成
@@ -4067,7 +4084,7 @@ def sheet_inventory(wb, stores, ctx):
                     x["aged"], x["good"], x["boost"], x["to_list"], x["discard"],
                     x["sales30_u"], ours, ours - x["sales30_u"]]
             for i, v in enumerate(vals, 1):
-                c = ws.cell(row=r, column=i, value=(int(v) if isinstance(v, float) else v))
+                c = ws.cell(row=r, column=i, value=cell_int(v))
                 if i >= 5:
                     c.number_format = INT
             cc = ws.cell(row=r, column=18, value=chk)

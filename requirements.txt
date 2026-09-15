@@ -1,20 +1,23 @@
-# Ziniao (紫鸟) browser automation - runtime dependencies
-# Install:  python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
+# meli-mx-pipeline —— 运行时依赖
 #
-# Versions below are the ones verified working on 2026-08-28 against
-# ziniao client 6.27.1 / store core Chromium 146.1.4.66.
+# 安装：
+#   python -m venv .venv
+#   .venv\Scripts\pip install -r requirements.txt
+#
+# 版本是 2026-08-28 在 紫鸟客户端 6.27.1 / 店铺内核 Chromium 146.1.4.66
+# 上验证通过的组合。锁死版本而不是写 >= —— 这套流程依赖 Selenium 附着
+# 已存在的浏览器（debuggerAddress），selenium 的小版本变更动过这条路径。
 
-requests==2.32.2      # HTTP IPC with the ziniao client (127.0.0.1:<port>)
-selenium==4.48.0      # attaches to the store browser via debuggerAddress
+# --- 下载层：驱动紫鸟浏览器 ---
+requests==2.32.2      # 与紫鸟客户端的 HTTP IPC（127.0.0.1:<port>）
+selenium==4.48.0      # 通过 debuggerAddress 附着到店铺浏览器
 
-# --- analysis (ANALYSIS_GUIDE.md) ---
-pandas==3.0.5         # aggregation for both analysis methods
-openpyxl==3.1.5       # reading the .xlsx exports
-XlsxWriter==3.2.9     # writing the method-1 report workbook
+# --- 报表层：report_build.py ---
+pandas==3.0.5         # 全部取数与汇总
+openpyxl==3.1.5       # 读平台导出的 .xlsx，写财务报表
 
-# --- downstream transform (downloads/mx_sales, see downloads/README.md) ---
-# run_batch.py shells out to `python -m mx_sales build` using THIS
-# interpreter, so its two extra dependencies live here rather than in a second
-# environment.
-pyarrow==25.0.1       # Parquet output under downloads/data/processed/
-duckdb==1.5.5         # views over that output (downloads/data/mx_sales.duckdb)
+# --- 清洗层：downloads/mx_sales ---
+# run_batch.py 用**同一个**解释器 shell out 到 `python -m mx_sales build`，
+# 所以它的两个额外依赖装在这里，不另建环境。
+pyarrow==25.0.1       # 输出 Parquet 到 downloads/data/processed/
+duckdb==1.5.5         # 在其上建视图（downloads/data/mx_sales.duckdb）
