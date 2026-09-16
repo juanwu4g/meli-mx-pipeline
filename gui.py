@@ -97,6 +97,9 @@ class App(object):
         self.root = root
         self.proc = None
         self.q = queue.Queue()
+        # 串起来跑的剩余步骤，见 run_chain()。空 = 当前是单步任务。
+        self.chain = []
+        self.chain_worst = 0
         root.title("meli-mx-pipeline —— 墨西哥店铺报表")
         root.geometry("980x680")
         root.minsize(820, 560)
@@ -184,29 +187,36 @@ class App(object):
     def _build_buttons(self):
         f = ttk.LabelFrame(self.root, text=" 操作 ", padding=10)
         f.pack(fill="x", padx=12, pady=6)
+        # (按钮文字, 回调, 说明, 是否会起子进程)
+        # 最后那个标志决定任务运行时要不要禁用它 —— 以前是按下标取前四个，
+        # 加一个按钮就得记得改数字，改漏了就会出现"任务跑着还能再点一下"。
         rows = [
+            ("① + ② 一次跑完", self.do_all,
+             "先下载【上面所选店铺】的数据，下完接着出报表，中间不用管。\n"
+             "全部 12 家约 3 小时。平时就点这一个。", True),
             ("① 下载数据", self.do_download,
              "打开紫鸟，下载【上面所选店铺】的报表并清洗。每家约 15 分钟，\n"
-             "全部 12 家约 3 小时。选了历史月份时会去那个月的账单明细页取数。"),
+             "全部 12 家约 3 小时。选了历史月份时会去那个月的账单明细页取数。", True),
             ("② 出报表", self.do_reports,
              "用已下载的数据，生成【上面所选店铺】的财务报表。约 1 分钟。\n"
-             "不联网、不开浏览器，可以随便重跑。"),
+             "不联网、不开浏览器，可以随便重跑。", True),
             ("先看用哪批数据", self.do_dry_run,
              "不生成任何文件，只列出每家店会用哪个下载目录、缺不缺该月账单。\n"
-             "秒出。做历史月份前先点这个，能提前看到哪几家数据不全。"),
+             "秒出。做历史月份前先点这个，能提前看到哪几家数据不全。", True),
             ("补取欠的报表", self.do_collect,
              "MercadoPago 有些报表要生成几十分钟。这个只打开确实欠着报表的店，\n"
-             "不重新下载，与上面的店铺选择无关。上一轮提示“still generating”就跑它。"),
+             "不重新下载，与上面的店铺选择无关。上一轮提示“still generating”就跑它。", True),
             ("打开报表目录", self.do_open_dir,
-             "在资源管理器里打开生成好的 .xlsx 所在目录。"),
+             "在资源管理器里打开生成好的 .xlsx 所在目录。", False),
         ]
         self.buttons = []
-        for i, (label, cmd, desc) in enumerate(rows):
+        for i, (label, cmd, desc, spawns) in enumerate(rows):
             b = ttk.Button(f, text=label, command=cmd, width=16)
             b.grid(row=i, column=0, sticky="w", pady=3)
             ttk.Label(f, text=desc, foreground="#555", justify="left").grid(
                 row=i, column=1, sticky="w", padx=12)
-            self.buttons.append(b)
+            if spawns:
+                self.buttons.append(b)
         self.stop_btn = ttk.Button(f, text="中止", command=self.do_stop,
                                    width=16, state="disabled")
         self.stop_btn.grid(row=len(rows), column=0, sticky="w", pady=(10, 0))
@@ -265,7 +275,8 @@ class App(object):
         picked = [self.stores[i] for i in self.lb.curselection()]
         return ["--stores"] + picked if picked else []
 
-    def do_download(self):
+    def _download_argv(self):
+        """下载那一步的命令行。用户在历史月份确认框里点了取消就返回 None。"""
         a = ["run_batch.py"] + self._args_stores()
         if self.month.get() != recent_months()[0]:
             a += ["--month", self.month.get()]
@@ -275,13 +286,51 @@ class App(object):
                     "脚本会去那个月的账单明细页单独取数，并把下载目录标上 "
                     "_m%s 后缀。\n\n继续？"
                     % (self.month.get(), self.month.get().replace("-", ""))):
-                return
-        self.run(a, "下载数据")
+                return None
+        return a
+
+    def _reports_argv(self):
+        return (["run_reports.py", "--month", self.month.get()]
+                + self._args_stores() + self._args_combined()
+                + self._args_outdir())
+
+    def do_download(self):
+        a = self._download_argv()
+        if a is not None:
+            self.run(a, "下载数据")
 
     def do_reports(self):
-        self.run(["run_reports.py", "--month", self.month.get()]
-                 + self._args_stores() + self._args_combined()
-                 + self._args_outdir(), "出报表")
+        self.run(self._reports_argv(), "出报表")
+
+    def do_all(self):
+        """下载 + 出报表，一次跑完，中间不需要人点。"""
+        a = self._download_argv()
+        if a is None:
+            return
+        who = "全部 %d 家店铺" % len(self.stores) if self.all_stores.get() \
+            else "所选的 %d 家店铺" % len(self.lb.curselection())
+        if not messagebox.askokcancel(
+                "一次跑完",
+                "会先下载 %s 的 %s 数据，下完接着出报表。\n\n"
+                "全部 12 家大约 3 小时，中间不需要你操作。\n"
+                "期间这台机器会反复开关紫鸟浏览器 —— 请不要手动去点紫鸟，\n"
+                "那会打断下载。\n\n开始？" % (who, self.month.get())):
+            return
+        self.run_chain([(a, "下载数据"), (self._reports_argv(), "出报表")])
+
+    def run_chain(self, steps):
+        """把几步串起来跑完。
+
+        下载那步退出码 >=2 就不再出报表 —— 和 run_monthly.py 同一个判断：
+        那种情况多半一个文件都没下下来，硬出报表会拿**上一批**下载目录的数据
+        生成一份看起来完全正常的报表，比没有报表更危险。
+        """
+        if self.proc is not None:
+            messagebox.showwarning("正在运行", "请等当前任务结束，或先点“中止”。")
+            return
+        self.chain = list(steps[1:])
+        self.chain_worst = 0
+        self.run(*steps[0])
 
     def do_dry_run(self):
         self.run(["run_reports.py", "--month", self.month.get(), "--dry-run"]
@@ -359,7 +408,10 @@ class App(object):
 
     def _finish(self, code, title):
         self.proc = None
-        self._lock(False)
+        # 还有下一步、且这一步不是硬失败 -> 不解锁按钮，避免中间闪一下可点。
+        chaining = bool(self.chain) and code < 2
+        if not chaining:
+            self._lock(False)
         # 退出码含义见 README §9。1 不是"失败"，是"有事要看"——
         # 报表已经写出来了，只是有校验没过，这恰恰是最该让人看见的情况。
         meaning = {
@@ -376,12 +428,35 @@ class App(object):
         self.log("")
         self.log(meaning[0], meaning[1])
 
+        if chaining:
+            self.chain_worst = max(self.chain_worst, code)
+            argv, nxt = self.chain.pop(0)
+            self.status.set("%s 结束，接着跑：%s …" % (title, nxt))
+            self.root.after(400, lambda: self.run(argv, nxt))
+            return
+        if self.chain:
+            self.log("已跳过后续步骤：%s —— 上一步没成功，不能拿旧数据出报表。"
+                     % "、".join(t for _, t in self.chain), "bad")
+            self.chain = []
+        elif self.chain_worst and code == 0:
+            # 最后一步干净收尾，但前面某步有事要看，别让它被最后那句绿字盖掉。
+            self.log("注意：前面的步骤有需要关注的项，往上翻。", "warn")
+            self.status.set("⚠ 跑完了，但前面的步骤有需要关注的项")
+            self.status_lbl.configure(foreground="#9a6700")
+        self.chain_worst = 0
+
     def do_stop(self):
         if self.proc is None:
             return
         if not messagebox.askokcancel("中止", "确定要结束正在跑的任务吗？\n"
                                               "已经下好的文件会保留。"):
             return
+        # 先断链再杀进程。Windows 上 terminate() 的退出码是 1，_finish 会把它
+        # 当成"有事要看、可以继续"，于是中止完反而自动跑起了下一步。
+        if self.chain:
+            self.log("已取消后续步骤：%s"
+                     % "、".join(t for _, t in self.chain), "warn")
+            self.chain = []
         try:
             self.proc.terminate()
         except Exception as e:
