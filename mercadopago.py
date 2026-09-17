@@ -945,6 +945,35 @@ def _require_access(driver, label):
             "Blocked on: %s" % label)
 
 
+# 每家店只检查一次语言。run_downloads 在每家店开跑前把它清掉 —— 和
+# meli_forms.SALES_PERIOD_ACTUAL 同一个套路：模块级变量在批量跑时会串店。
+LANG_CHECKED = {"done": False}
+
+
+def _check_language(driver):
+    """MercadoPago 页面是不是西语。只警告，不拦路。
+
+    这边没有语言切换器（整页扫不到任何 language/idioma 元素），能用的只有
+    `<html lang>`。所以发现不对也改不了，只能说出来 —— 而这已经足够：MP 的
+    报表列名同样跟着语言走，出问题时至少不是无声无息的。
+
+    语言多半跟着 MercadoLibre 那边的账号设置走（meli_forms.ensure_language
+    已经把它摆正），但这一点**没有实测过**，所以这里独立检查而不是假定。
+    """
+    if LANG_CHECKED["done"]:
+        return
+    LANG_CHECKED["done"] = True
+    try:
+        lang = driver.execute_script("return document.documentElement.lang") or ""
+    except Exception:
+        return
+    if not lang.lower().startswith("es"):
+        print("  [警告] MercadoPago 页面语言是 %r，不是西语 —— 导出报表的列名"
+              "会跟着变，后续解析可能对不上。请在账号里改回西班牙语。" % lang)
+    else:
+        print("  页面语言：%s ✓" % lang)
+
+
 def request_report(driver, report="settlement", days=60, fmt="csv"):
     """PHASE 1 - kick off generation. Returns a pending dict, or None.
 
@@ -961,6 +990,7 @@ def request_report(driver, report="settlement", days=60, fmt="csv"):
     print("\n--- MercadoPago：申请 %s ---" % label)
     driver.get(url)
     time.sleep(15)
+    _check_language(driver)
     _require_access(driver, label)
 
     if flavor == "accordion":

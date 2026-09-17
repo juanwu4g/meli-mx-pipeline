@@ -185,6 +185,90 @@ def wait_for_downloads(path, before, min_files=1, timeout=240, settle=12, label=
     return sorted(seen)
 
 
+# ---------------------------------------------------- 0. 语言关卡
+
+SELLER_HOME = BILLING_BASE + "/resumen"
+WANT_LOCALE = "es_MX"
+
+# 整个下载层靠可见的西语文字定位元素（"Ir al detalle"、"descargar"、
+# "almacenamiento"、/ultimos?\s*(\d+)\s*mes/ …），导出文件的列名也是西语，
+# 而**导出文件的语言跟着账号的界面语言走**。有人在浏览器里把语言改成 English，
+# 后果分两种，后一种才可怕：
+#
+#   * 元素找不到 -> 抛错，这家店整个失败，看得见
+#   * 账期页的月份名核对失败 -> **那一期被静默跳过**，报表少算费用而毫无提示。
+#     只下目标月而漏掉后续账期，实测让 EWTTO_SM 少算佣金 973.23、代扣税率
+#     从 9.172% 虚高到 9.221%。
+#
+# 与其把几十处选择器翻译成多语言（还要为每种语言维护一套列名表），不如在跑
+# 任何路线之前先确认语言，不对就改回来。
+#
+# 关键点：判据用的是 `data-selected-locale="es_MX"` 这个 **locale 代码**，
+# 不是可见文字。所以这道检查本身不会因为语言变了而失效 —— 用文字判断语言，
+# 语言一变判断自己就先瞎了。
+JS_GET_LOCALE = """
+const el = document.querySelector('.nav-user-menu-language-switcher');
+if (el && el.getAttribute('data-selected-locale'))
+  return el.getAttribute('data-selected-locale');
+const s = document.querySelector(
+  '.nav-user-menu-language-switcher__option[aria-selected="true"]');
+return s ? s.getAttribute('data-value') : null;
+"""
+
+# 切换器藏在用户菜单里（折叠状态），但 JS 点击不受可见性限制：先点触发器把
+# 组件唤醒，再点目标选项。已经是目标语言时直接返回 already，不做无谓点击。
+JS_SET_LOCALE = """
+const want = arguments[0];
+const root = document.querySelector('.nav-user-menu-language-switcher');
+if (!root) return 'no-switcher';
+if (root.getAttribute('data-selected-locale') === want) return 'already';
+const t = document.getElementById('nav-user-menu-language-switcher-trigger');
+if (t) t.click();
+const o = root.querySelector('[data-value="' + want + '"]');
+if (!o) return 'no-option';
+o.click();
+return 'clicked';
+"""
+
+
+def ensure_language(driver, want=WANT_LOCALE, timeout=30):
+    """进店后、跑任何路线之前：确认卖家后台是西语，不是就切回去。
+
+    返回 (进来时的 locale 或 None, 是否动过)。
+
+    读不到切换器时**不拦路**，只发警告：那多半是页面改版，而为了一个读不到
+    的判据把 12 家店全挡住，比它要防的问题更糟。真的改不回来才抛错 —— 那种
+    情况下继续跑必然产出错语言的导出。
+    """
+    if not (driver.current_url or "").startswith(BILLING_BASE):
+        driver.get(SELLER_HOME)
+        time.sleep(6)
+    cur = driver.execute_script(JS_GET_LOCALE)
+    if cur is None:
+        print("  [警告] 顶栏找不到语言切换器，无法确认界面语言。"
+              "若平台改版，下载层的西语选择器可能已经失效。")
+        return None, False
+    if cur == want:
+        print("  界面语言：%s ✓" % cur)
+        return cur, False
+
+    print("  [警告] 界面语言是 %s，不是 %s —— 导出文件的列名会跟着变，"
+          "正在切回去。" % (cur, want))
+    r = driver.execute_script(JS_SET_LOCALE, want)
+    if r not in ("clicked", "already"):
+        raise RuntimeError("切换界面语言失败（%s）：当前 %s，需要 %s。"
+                           "请在浏览器里手动改回西班牙语。" % (r, cur, want))
+    time.sleep(4)
+    driver.get(SELLER_HOME)
+    time.sleep(6)
+    now = driver.execute_script(JS_GET_LOCALE)
+    if now != want:
+        raise RuntimeError("界面语言切换后仍是 %s（期望 %s）。"
+                           "请在浏览器里手动改回西班牙语再跑。" % (now, want))
+    print("  界面语言已从 %s 改回 %s ✓" % (cur, want))
+    return cur, True
+
+
 # ---------------------------------------------------- 1. Facturación reports
 
 def _open_reports_tab(driver, timeout=90):

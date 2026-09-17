@@ -79,6 +79,8 @@ def add_route_args(ap):
     ap.add_argument("--collect-poll", type=int, default=20,
                     help="pause between collect cycles, seconds (default 20)")
     ap.add_argument("--skip-ip-check", action="store_true")
+    ap.add_argument("--skip-lang-check", action="store_true",
+                    help="跳过进店时的界面语言检查（调试用）")
     return ap
 
 
@@ -359,6 +361,21 @@ def run_store(client, store_name, args, out_dir=None, close_when_done=True,
         # 模块级变量，批量跑时会带着上一家店的值进来 —— 这家店若跳过销售
         # 路线，就会把上一家的窗口错记到这家头上。每家店开跑前清掉。
         meli_forms.SALES_PERIOD_ACTUAL["months"] = None
+        mercadopago.LANG_CHECKED["done"] = False
+
+        # ---------------- PHASE 0: 语言关卡 ----------------------------------
+        # 必须排在所有路线之前：整个下载层按西语文字定位元素，导出文件的列名
+        # 也是西语，而导出语言跟着账号的界面语言走。放在后面就来不及了 ——
+        # 账期页的月份名核对会静默跳过整期，费用少算而毫无提示。
+        if not args.skip_lang_check:
+            got = _guard(result, "language", meli_forms.ensure_language, d)
+            if got is not FAILED:
+                was, changed = got
+                result["locale"] = was
+                if changed:
+                    result["errors"].append(
+                        "language: 界面语言原本是 %s，已改回 es_MX。"
+                        "请查清是谁改的 —— 期间导出的报表列名可能是错的。" % was)
 
         # ---------------- PHASE 1: request everything that generates slowly ---
         # These sit in a server-side queue while phase 2 does real work, so the
