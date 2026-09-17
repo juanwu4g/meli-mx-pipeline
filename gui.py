@@ -223,6 +223,10 @@ class App(object):
         ttk.Label(f, text="强制结束正在跑的任务。下载中止后已下好的文件会保留。",
                   foreground="#555").grid(row=len(rows), column=1, sticky="w",
                                           padx=12, pady=(10, 0))
+        ttk.Label(f, foreground="#555",
+                  text="想让它每月自动跑、不用人来点？双击 定时设置.cmd。"
+                  ).grid(row=len(rows) + 1, column=0, columnspan=2, sticky="w",
+                         pady=(10, 0))
 
     def _build_log(self):
         f = ttk.LabelFrame(self.root, text=" 运行日志 ", padding=6)
