@@ -57,12 +57,22 @@ MONTHS_XML = "".join("<%s/>" % m for m in (
 
 # ────────────────────────────────────────────────────────── 系统调用
 
-def _run(argv, timeout=120):
-    """跑一个命令，返回 (退出码, 输出)。永不抛异常。"""
+def _run(argv, timeout=120, encoding="oem"):
+    """跑一个命令，返回 (退出码, 输出)。永不抛异常。
+
+    默认按 **oem** 解码。schtasks.exe 这类控制台程序把消息写成 OEM 代码页
+    （中文系统是 cp936），按 utf-8 解出来是乱码 —— 而出错时那一行恰恰是唯一
+    能说明原因的东西。英文系统的 OEM 是 437，纯 ASCII，两种解法看不出差别，
+    所以这个问题只在中文机器上暴露。
+    """
     try:
-        p = subprocess.run(argv, capture_output=True, timeout=timeout,
-                           encoding="utf-8", errors="replace")
-        return p.returncode, (p.stdout or "") + (p.stderr or "")
+        p = subprocess.run(argv, capture_output=True, timeout=timeout)
+        raw = (p.stdout or b"") + (p.stderr or b"")
+        try:
+            text = raw.decode(encoding, "replace")
+        except LookupError:
+            text = raw.decode("utf-8", "replace")
+        return p.returncode, text
     except Exception as e:
         return -1, "%s: %s" % (e.__class__.__name__, e)
 
@@ -71,12 +81,13 @@ def ps(script, timeout=120):
     """跑一段 PowerShell。
 
     开头强制 UTF-8：任务名里有中文，不设的话输出按 cp936 回来，Python 这边
-    按 utf-8 解会变成乱码。
+    按 utf-8 解会变成乱码。所以这一路按 utf-8 解，不走 oem。
     """
     return _run(["powershell", "-NoProfile", "-NonInteractive",
                  "-ExecutionPolicy", "Bypass", "-Command",
                  "$OutputEncoding=[Console]::OutputEncoding="
-                 "[Text.Encoding]::UTF8;" + script], timeout)
+                 "[Text.Encoding]::UTF8;" + script],
+                timeout, encoding="utf-8")
 
 
 def kv(out):
@@ -90,6 +101,22 @@ def kv(out):
 
 
 # ────────────────────────────────────────────────────────── 任务读写
+
+def current_user():
+    """任务要以谁的身份跑，写成 计算机名\\用户名。
+
+    优先问 whoami：它返回的就是 Windows 认的那个主体。环境变量拼出来的形式
+    在微软账号、域账号、改过计算机名的机器上不一定能被 schtasks 解析 ——
+    解析不了时 schtasks 只回一句退出码 1 的错误，很难查。
+    """
+    rc, out = _run(["whoami"], timeout=20)
+    who = (out or "").strip().splitlines()[0].strip() if out.strip() else ""
+    if rc == 0 and "\\" in who:
+        return who
+    user = os.environ.get("USERNAME", "")
+    domain = os.environ.get("USERDOMAIN", "")
+    return ("%s\\%s" % (domain, user)) if domain else user
+
 
 def task_state(name):
     """任务现状。不存在返回 None。"""
@@ -120,9 +147,7 @@ def task_xml(args=None, day=None, hour=0, minute=0):
 
     day 为 None 时不带触发器 —— 试跑任务只靠手工触发，不该自己跑起来。
     """
-    user = os.environ.get("USERNAME", "")
-    domain = os.environ.get("USERDOMAIN", "")
-    who = ("%s\\%s" % (domain, user)) if domain else user
+    who = current_user()
     trigger = ""
     if day is not None:
         # StartBoundary 的日期部分只决定"从哪天起生效"，具体哪天跑由
@@ -177,21 +202,37 @@ def task_xml(args=None, day=None, hour=0, minute=0):
 
 
 def install(name, xml):
-    """导入任务 XML。
+    """导入任务 XML。返回 (退出码, 说明)。
 
     必须写成 UTF-16：schtasks /xml 读 UTF-8 文件会报 ERROR: 无效的 XML。
+
+    失败时**不删**那个临时 XML，并把路径、身份、原始报错一起带回去。
+    schtasks 失败只给一个退出码 1，不把这些摆出来根本没法查。
     """
-    fd, path = tempfile.mkstemp(suffix=".xml")
+    fd, path = tempfile.mkstemp(prefix="mxtask_", suffix=".xml")
     os.close(fd)
-    try:
-        with io.open(path, "w", encoding="utf-16") as f:
-            f.write(xml)
-        return _run(["schtasks", "/create", "/tn", name, "/xml", path, "/f"])
-    finally:
+    with io.open(path, "w", encoding="utf-16") as f:
+        f.write(xml)
+    rc, out = _run(["schtasks", "/create", "/tn", name, "/xml", path, "/f"])
+    if rc == 0:
         try:
             os.remove(path)
         except OSError:
             pass
+        return rc, out
+    detail = [
+        (out or "").strip() or "(schtasks 没有输出)",
+        "",
+        "排查用的信息：",
+        "  任务身份：%s" % current_user(),
+        "  要跑的程序：%s" % RUNNER,
+        "  工作目录：%s" % ROOT,
+        "  任务定义文件（没删，可以打开看）：%s" % path,
+        "",
+        "想看更完整的报错，把下面这行贴到「命令提示符」里执行：",
+        '  schtasks /create /tn "%s" /xml "%s" /f' % (name, path),
+    ]
+    return rc, "\n".join(detail)
 
 
 # ────────────────────────────────────────────────────────── 机器自检
