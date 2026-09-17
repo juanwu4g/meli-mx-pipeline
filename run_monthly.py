@@ -47,6 +47,7 @@ import datetime
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -78,25 +79,55 @@ def config():
 
 # ---------------------------------------------------------------- 锁
 
+def alive(pid):
+    """这个进程还在吗。判断不了就返回 True（宁可多等，不要抢锁）。
+
+    不能用 os.kill(pid, 0) —— Windows 上 CPython 的 os.kill 走的是
+    TerminateProcess，信号 0 会把目标进程**杀掉**，而不是探测它。
+    """
+    if not pid:
+        return True
+    try:
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/NH"],
+                             capture_output=True, timeout=20,
+                             encoding="utf-8", errors="replace").stdout or ""
+    except Exception:
+        return True
+    # 没匹配到时 tasklist 打的是一句本地化的提示，里面不会有这个 PID。
+    return str(pid) in out
+
+
 def acquire():
     """防重入。手动跑和计划任务撞上时，两个进程同时驱动同一个紫鸟客户端，
-    后启动的那个会把前一个的浏览器连同会话一起重启掉。"""
+    后启动的那个会把前一个的浏览器连同会话一起重启掉。
+
+    锁里记了 PID，进程没了就立刻接管。只看文件年龄是不够的：跑批中途被
+    强杀（关窗口、任务超时、断电）时锁会留下，而下一次定时运行往往就在几
+    分钟后 —— 实测过一次 10:01 被杀、10:10 的定时任务拿到退出码 5，
+    再按 STALE_HOURS 还要空等 8 小时。
+    """
     if not os.path.isdir(LOG_DIR):
         os.makedirs(LOG_DIR)
     if os.path.exists(LOCK):
         age = (datetime.datetime.now()
                - datetime.datetime.fromtimestamp(os.path.getmtime(LOCK)))
-        if age < datetime.timedelta(hours=STALE_HOURS):
-            try:
-                with io.open(LOCK, encoding="utf-8") as f:
-                    who = f.read().strip()
-            except Exception:
-                who = "?"
-            print("上一次还在跑（%s），本次跳过。" % who)
+        try:
+            with io.open(LOCK, encoding="utf-8") as f:
+                who = f.read().strip()
+        except Exception:
+            who = ""
+        m = re.search(r"pid=(\d+)", who)
+        pid = int(m.group(1)) if m else 0
+        if not alive(pid):
+            print("[提示] 锁是 %s 留下的，但那个进程已经不在了（上次被中断），"
+                  "本次接管。" % (who or "上一次运行"))
+        elif age < datetime.timedelta(hours=STALE_HOURS):
+            print("上一次还在跑（%s），本次跳过。" % (who or "?"))
             print("确认没有在跑的话，删掉 %s 再试。" % LOCK)
             return False
-        print("[警告] 发现 %.1f 小时前的残留锁，判定为上次被强杀，接管。"
-              % (age.total_seconds() / 3600.0))
+        else:
+            print("[警告] 锁已存在 %.1f 小时且进程仍在，超过 %d 小时判为异常，接管。"
+                  % (age.total_seconds() / 3600.0, STALE_HOURS))
     with io.open(LOCK, "w", encoding="utf-8") as f:
         f.write("pid=%d 起于 %s" % (os.getpid(), now()))
     return True

@@ -4,7 +4,7 @@
     双击 定时设置.cmd    （推荐，它会用对解释器）
     或   .venv\\Scripts\\python schedule_gui.py
 
-做四件事：建/改每月的计划任务、彩排一次、看状态、检查这台机器够不够格
+做四件事：建/改每月的计划任务、试跑一次、看状态、检查这台机器够不够格
 无人值守。**业务逻辑一行都没有** —— 真正跑的是 run_monthly.cmd，这里只是
 把 Windows 任务计划程序那一堆勾选项替人点好。
 
@@ -42,7 +42,7 @@ from tkinter import ttk, messagebox
 from gui import ROOT, interpreter, store_list, load_settings, save_settings
 
 TASK = "MX月度报表"
-REHEARSAL = TASK + "-彩排"
+REHEARSAL = TASK + "-试跑"
 RUNNER = os.path.join(ROOT, "run_monthly.cmd")
 LOG_DIR = os.path.join(ROOT, "logs")
 
@@ -118,7 +118,7 @@ def task_state(name):
 def task_xml(args=None, day=None, hour=0, minute=0):
     """生成任务 XML。
 
-    day 为 None 时不带触发器 —— 彩排任务只靠手工触发，不该自己跑起来。
+    day 为 None 时不带触发器 —— 试跑任务只靠手工触发，不该自己跑起来。
     """
     user = os.environ.get("USERNAME", "")
     domain = os.environ.get("USERDOMAIN", "")
@@ -201,17 +201,19 @@ def machine_checks():
     out = []
 
     venv = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
-    out.append((os.path.exists(venv), "虚拟环境 .venv",
-                "有" if os.path.exists(venv) else
-                "缺。先跑：python -m venv .venv 再 pip install -r requirements.txt"))
+    out.append((os.path.exists(venv), "程序环境",
+                "装好了" if os.path.exists(venv) else
+                "没装好（缺 .venv 文件夹）。找技术的人跑一次安装命令。"))
 
-    out.append((os.path.exists(RUNNER), "run_monthly.cmd",
-                "有" if os.path.exists(RUNNER) else "缺，git pull 一下"))
+    out.append((os.path.exists(RUNNER), "自动跑的脚本",
+                "在" if os.path.exists(RUNNER) else
+                "找不到 run_monthly.cmd，程序文件不全。"))
 
     names = store_list()
-    out.append((bool(names), "店铺白名单",
-                "%d 家：%s" % (len(names), "、".join(names[:3]) + ("…" if len(names) > 3 else ""))
-                if names else "读不到 config.json，或白名单为空"))
+    out.append((bool(names), "要跑哪些店",
+                "%d 家：%s" % (len(names), "、".join(names[:3]) +
+                              ("…" if len(names) > 3 else ""))
+                if names else "读不出店铺名单，config.json 可能有问题。"))
 
     # 睡眠：powercfg 的标签是本地化的，但这一段永远是 5 行带 0x 的值，
     # 顺序固定为 最小/最大/步进/交流/电池，所以取倒数第二行（交流）。
@@ -219,27 +221,30 @@ def machine_checks():
     hexes = re.findall(r"0x[0-9a-fA-F]{8}", txt or "")
     if rc == 0 and len(hexes) >= 2:
         ac = int(hexes[-2], 16)
-        out.append((ac == 0, "交流电源下不睡眠",
-                    "已设为永不睡眠" if ac == 0 else
-                    "%d 分钟后睡眠 —— 睡着了任务跑不了" % (ac // 60)))
+        out.append((ac == 0, "电脑会不会睡着",
+                    "设成了永不睡眠" if ac == 0 else
+                    "闲置 %d 分钟就睡。睡着了就跑不了 —— 下面可以一键改。"
+                    % (ac // 60)))
     else:
-        out.append((None, "交流电源下不睡眠", "查不到，手动确认"))
+        out.append((None, "电脑会不会睡着", "读不出来，请手动确认电源设置。"))
 
     rc, txt = ps("'V=' + (Get-ItemProperty "
                  "'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon' "
                  "-Name AutoAdminLogon -ErrorAction SilentlyContinue).AutoAdminLogon")
     auto = kv(txt).get("V", "")
-    out.append((auto == "1", "自动登录",
-                "已开启" if auto == "1" else
-                "没开。断电重启后没人登录，任务就不会跑（netplwiz 里设）"))
+    out.append((auto == "1", "开机要不要输密码",
+                "已设成开机自动登录" if auto == "1" else
+                "要输密码。万一停电重启，没人输密码就没人登录，任务也跑不了。"
+                "设置办法：开始菜单搜 netplwiz，取消勾选那个要密码的选项。"))
 
     rc, txt = ps("$d='HKCU:\\Control Panel\\Desktop';"
                  "'S=' + (Get-ItemProperty $d -Name ScreenSaverIsSecure "
                  "-ErrorAction SilentlyContinue).ScreenSaverIsSecure")
     sec = kv(txt).get("S", "")
-    out.append((sec != "1", "屏保不锁屏",
-                "没开锁屏屏保" if sec != "1" else
-                "屏保会锁屏。锁屏后浏览器渲染可能被挂起，建议关掉"))
+    out.append((sec != "1", "会不会自动锁屏",
+                "不会自动锁屏" if sec != "1" else
+                "屏保会锁屏。锁屏后浏览器可能停住，建议关掉："
+                "设置 → 个性化 → 锁屏界面 → 屏幕保护程序，取消「恢复时显示登录屏幕」。"))
     return out
 
 
@@ -260,7 +265,8 @@ class SchedApp(object):
         self.root = root
         self.q = queue.Queue()
         self.busy = False
-        root.title("定时任务设置 —— 每月自动出报表")
+        self.busy_label = ""
+        root.title("每月自动出报表 —— 设置")
         root.geometry("860x660")
         root.minsize(760, 560)
 
@@ -280,20 +286,20 @@ class SchedApp(object):
     # ---------------------------------------------------------- 布局
 
     def _build_status(self):
-        f = ttk.LabelFrame(self.root, text=" 当前状态 ", padding=10)
+        f = ttk.LabelFrame(self.root, text=" 现在是什么状态 ", padding=10)
         f.pack(fill="x", padx=12, pady=(10, 6))
-        self.status = tk.StringVar(value="查询中…")
+        self.status = tk.StringVar(value="正在读取…")
         self.status_lbl = ttk.Label(f, textvariable=self.status,
                                     font=("Microsoft YaHei UI", 11, "bold"))
         self.status_lbl.pack(anchor="w")
         self.detail = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.detail, foreground="#555",
                   justify="left").pack(anchor="w", pady=(4, 0))
-        ttk.Button(f, text="刷新", command=self.refresh, width=10).pack(
+        ttk.Button(f, text="刷新状态", command=self.refresh, width=12).pack(
             anchor="w", pady=(8, 0))
 
     def _build_form(self):
-        f = ttk.LabelFrame(self.root, text=" 什么时候跑 ", padding=10)
+        f = ttk.LabelFrame(self.root, text=" 什么时候自动跑 ", padding=10)
         f.pack(fill="x", padx=12, pady=6)
         row = ttk.Frame(f)
         row.pack(anchor="w")
@@ -308,26 +314,30 @@ class SchedApp(object):
                     textvariable=self.minute).pack(side="left", padx=(8, 4))
         ttk.Label(row, text="分").pack(side="left")
         ttk.Label(f, foreground="#555", justify="left", text=(
-            "跑的是【上个月】的报表：15 号跑，出的是上月的数 —— 那时候上月的账单\n"
-            "已经闭账，数字基本稳定。最多只能选到 28 号，29～31 号在二月不会触发。\n"
-            "凌晨跑最好：跑批会重启紫鸟客户端，那个点不会关掉任何人开着的窗口。")
+            "出的永远是【上个月】的报表。9 月 15 号跑，出的是 8 月。\n"
+            "选 15 号是因为上个月的账单到那时已经结清，数字不会再变。\n"
+            "选凌晨是因为跑的时候会重开紫鸟浏览器，会关掉别人正开着的窗口。\n"
+            "日期最大 28：29～31 号遇上二月就不会触发。")
                   ).pack(anchor="w", pady=(8, 0))
 
     def _build_actions(self):
         f = ttk.LabelFrame(self.root, text=" 操作 ", padding=10)
         f.pack(fill="x", padx=12, pady=6)
         rows = [
-            ("创建 / 更新任务", self.do_install,
-             "按上面的时间写进 Windows 任务计划程序。已存在就覆盖。"),
-            ("彩排（约 1 分钟）", self.do_rehearse,
-             "建一个临时任务只跑「出报表」那一步，跑完自动删。\n"
-             "一分钟就能验完整条链路：能不能被计划任务拉起、中文会不会乱码、日志落没落盘。"),
-            ("立即完整跑一次", self.do_run_now,
-             "现在就按正式任务跑一遍，下载 + 出报表，约 3 小时。"),
-            ("检查这台机器", self.do_check,
-             "只读检查：睡眠、自动登录、锁屏、虚拟环境、店铺白名单。"),
-            ("删除任务", self.do_delete, "把计划任务撤掉，脚本和数据都不动。"),
-            ("打开日志目录", self.do_logs, "看 logs\\monthly_*.log。"),
+            ("设为每月自动跑", self.do_install,
+             "按上面选的时间登记到 Windows。已经登记过就按新时间改掉。"),
+            ("试跑一次（1 分钟）", self.do_rehearse,
+             "只出报表，不下载、不开浏览器，跑完自动收拾干净。\n"
+             "用来确认这台电脑到时候真能自动跑起来 —— 别等到 15 号才发现跑不了。"),
+            ("现在就跑一次", self.do_run_now,
+             "立刻按正式任务跑一遍：下载 + 出报表，约 3 小时。不影响以后的自动跑。"),
+            ("检查这台电脑", self.do_check,
+             "看这台电脑能不能撑住半夜没人管地跑：会不会睡着、会不会锁屏、\n"
+             "开机要不要有人输密码。只看不改。"),
+            ("取消每月自动跑", self.do_delete,
+             "只撤掉 Windows 里的登记。程序、数据、已出的报表都不动。"),
+            ("打开日志文件夹", self.do_logs,
+             "每次自动跑的完整记录都在这里（logs\\monthly_年月.log）。"),
         ]
         self.buttons = []
         for i, (label, cmd, desc) in enumerate(rows):
@@ -358,31 +368,43 @@ class SchedApp(object):
         self.txt.see("end")
         self.txt.configure(state="disabled")
 
-    def _lock(self, busy):
+    def _lock(self, busy, label=""):
         self.busy = busy
+        self.busy_label = label
         for b in self.buttons:
             b.configure(state="disabled" if busy else "normal")
 
-    def _work(self, fn, done):
-        """把慢活丢到子线程。Tk 控件只在主线程碰。"""
-        if self.busy:
-            messagebox.showwarning("正在忙", "等当前操作结束再点。")
+    def _work(self, fn, done, label="", lock=True):
+        """把慢活丢到子线程。Tk 控件只在主线程碰。
+
+        lock=False 给只读查询用（读一次任务状态要 2 秒左右）。查询期间按钮
+        照常能点，否则刚打开窗口那两秒什么都点不了。
+        """
+        if lock and self.busy:
+            messagebox.showwarning(
+                "还在忙",
+                "「%s」还没跑完，等它结束再点。" % (self.busy_label or "上一个操作"))
             return
-        self._lock(True)
+        if lock:
+            self._lock(True, label)
 
         def body():
             try:
-                self.q.put((done, fn()))
+                self.q.put((done, fn(), lock))
             except Exception as e:
-                self.q.put((done, ("err", "%s: %s" % (e.__class__.__name__, e))))
+                self.q.put((done, ("err", "%s: %s" % (e.__class__.__name__, e)), lock))
         threading.Thread(target=body, daemon=True).start()
 
     def _drain(self):
         try:
             while True:
-                fn, payload = self.q.get_nowait()
+                fn, payload, locked = self.q.get_nowait()
+                # 先解锁再回调。反过来的话，回调里想再发起一个操作（比如建完
+                # 任务顺手刷新状态、自检完去修电源）会撞上 busy 还是 True，
+                # 于是什么都没做，只弹一句"还在忙"——这正是之前的表现。
+                if locked:
+                    self._lock(False)
                 fn(payload)
-                self._lock(False)
         except queue.Empty:
             pass
         self.root.after(80, self._drain)
@@ -390,30 +412,39 @@ class SchedApp(object):
     # ---------------------------------------------------------- 动作
 
     def refresh(self):
-        self._work(lambda: task_state(TASK), self._show_state)
+        # 只读查询，不锁按钮：它要 2 秒，锁上的话刚开窗口那两秒点什么都没反应。
+        self._work(lambda: task_state(TASK), self._show_state, lock=False)
 
     def _show_state(self, st):
         if isinstance(st, tuple):                    # 出错了
-            self.status.set("查询失败")
+            self.status.set("读不到任务状态")
             self.status_lbl.configure(foreground="#b42318")
             self.log(st[1], "bad")
             return
         if not st:
-            self.status.set("● 还没有设置定时任务")
+            self.status.set("● 还没设置，现在不会自动跑")
             self.status_lbl.configure(foreground="#9a6700")
-            self.detail.set("按下面的时间点「创建 / 更新任务」即可。")
+            self.detail.set("选好时间，点「设为每月自动跑」。")
             return
         code = st.get("RESULT", "")
-        verdict = {"0": ("上次跑完，全部正常", "#1a7f37"),
-                   "1": ("上次跑完，有需要关注的项 —— 看日志", "#9a6700"),
-                   "267009": ("正在运行", "#9a6700"),
-                   "267011": ("还没跑过", "#666666")}.get(
-            code, ("上次退出码 %s —— 看日志" % code, "#b42318"))
-        self.status.set("● 已设置：每月 %s 号 %s" % (st.get("DAY"), st.get("TIME")))
+        # 0–5 是 run_monthly.py 自己的退出码（见它的文件头），267xxx 是
+        # Windows 任务计划程序的状态码。都翻成人话，不要让人去查代码表。
+        verdict = {"0": "上次跑完，一切正常",
+                   "1": "上次跑完了，但有几项要人看一眼（点「打开日志文件夹」）",
+                   "2": "上次没跑成：浏览器没能启动，报表也没出",
+                   "3": "上次没跑成：店铺名单对不上，要改配置",
+                   "4": "上次没跑成：配置文件读不了",
+                   "5": "上次没跑：上一轮还没结束，这次被跳过了",
+                   "267009": "正在跑",
+                   "267011": "还没跑过",
+                   "267014": "上次被中途停掉了（超时，或有人手动停的）"}.get(
+            code, "上次没跑成（代码 %s），点「打开日志文件夹」看原因" % code)
+        self.status.set("● 已设置：每月 %s 号 %s 自动跑"
+                        % (st.get("DAY"), st.get("TIME")))
         self.status_lbl.configure(foreground="#1a7f37")
-        self.detail.set("下次运行：%s\n上次运行：%s\n%s"
-                        % (st.get("NEXT") or "—", st.get("LAST") or "—",
-                           verdict[0]))
+        self.detail.set("下次：%s\n上次：%s\n%s"
+                        % (st.get("NEXT") or "还没跑过",
+                           st.get("LAST") or "还没跑过", verdict))
         # 界面上的时间跟已登记的对齐，免得改了没保存的人看错
         try:
             self.day.set(int(st.get("DAY")))
@@ -425,57 +456,61 @@ class SchedApp(object):
 
     def do_install(self):
         if not os.path.exists(RUNNER):
-            messagebox.showerror("缺文件", "找不到 run_monthly.cmd：\n%s" % RUNNER)
+            messagebox.showerror(
+                "程序文件不全",
+                "找不到 run_monthly.cmd：\n%s\n\n"
+                "程序文件不全，找技术的人看一下。" % RUNNER)
             return
         d, h, m = self.day.get(), self.hour.get(), self.minute.get()
         if not messagebox.askokcancel(
-                "创建定时任务",
-                "每月 %d 号 %02d:%02d 自动跑一次：\n"
-                "  ① 下载上个月的数据（全部店铺）\n"
-                "  ② 生成上个月的报表\n\n"
-                "任务会设成【只在用户登录时运行】—— 紫鸟是带界面的程序，\n"
-                "这条不能改。所以这台机器要保持登录、不睡眠、不锁屏。\n\n"
+                "设为每月自动跑",
+                "以后每月 %d 号 %02d:%02d，这台电脑会自己做两件事：\n"
+                "  ① 下载上个月的数据（12 家店全部）\n"
+                "  ② 出上个月的报表\n\n"
+                "这台电脑那时候必须是开着的、已经登录、没睡着、没锁屏。\n"
+                "（下载要开浏览器，没人登录就开不起来。）\n\n"
                 "继续？" % (d, h, m)):
             return
         save_settings(dict(load_settings(), sched_day=d, sched_hour=h,
                            sched_minute=m))
         self.log("")
-        self.log("正在写入计划任务：每月 %d 号 %02d:%02d" % (d, h, m))
+        self.log("正在登记：每月 %d 号 %02d:%02d" % (d, h, m))
         self._work(lambda: install(TASK, task_xml(day=d, hour=h, minute=m)),
-                   self._after_install)
+                   self._after_install, label="设为每月自动跑")
 
     def _after_install(self, r):
         rc, out = r
         if rc == 0:
-            self.log("✓ 已写入。错过时补跑、超 5 小时自动停止、电池限制已关，"
-                     "都一并设好了。", "good")
-            self.log("建议现在点一次「彩排」，一分钟验完整条链路。", "dim")
+            self.log("✓ 登记好了。另外这几项也一并设上了：那天电脑要是关着，"
+                     "开机后会补跑；跑超过 5 小时自动停；用电池也照跑。", "good")
+            self.log("建议现在点一次「试跑一次」，1 分钟就知道到时候跑不跑得起来。",
+                     "dim")
             self.refresh()
         else:
-            self.log("✗ 写入失败（退出码 %s）" % rc, "bad")
-            self.log(out.strip() or "(没有输出)", "bad")
+            self.log("✗ 没登记成（错误码 %s）" % rc, "bad")
+            self.log(out.strip() or "(没有更多信息)", "bad")
 
     def do_rehearse(self):
         if not messagebox.askokcancel(
-                "彩排",
-                "会建一个临时任务，只跑「出报表」那一步（不下载、不开浏览器），\n"
-                "跑完自动删掉。约 1 分钟。\n\n"
-                "这一步验的是：任务能不能被计划程序拉起、工作目录对不对、\n"
-                "中文会不会乱码、日志有没有落盘。\n\n开始？"):
+                "试跑一次",
+                "会让 Windows 真的把程序拉起来跑一遍，但只出报表 ——\n"
+                "不下载、不开浏览器，跑完自己收拾干净。约 1 分钟。\n\n"
+                "这一步是为了提前确认：到了 15 号半夜没人管的时候，\n"
+                "这台电脑确实能把程序跑起来。\n\n开始？"):
             return
         self.log("")
         self.log("=" * 64)
-        self.log(">>> 彩排  %s" % datetime.datetime.now().strftime("%H:%M:%S"))
-        self._work(self._rehearse_body, self._after_rehearse)
+        self.log(">>> 试跑  %s" % datetime.datetime.now().strftime("%H:%M:%S"))
+        self._work(self._rehearse_body, self._after_rehearse, label="试跑一次")
 
     def _rehearse_body(self):
         rc, out = install(REHEARSAL, task_xml(args="--step report"))
         if rc != 0:
-            return ("err", "建临时任务失败：%s" % (out.strip() or rc))
+            return ("err", "建不了临时任务：%s" % (out.strip() or rc))
         rc, out = _run(["schtasks", "/run", "/tn", REHEARSAL])
         if rc != 0:
             _run(["schtasks", "/delete", "/tn", REHEARSAL, "/f"])
-            return ("err", "启动临时任务失败：%s" % (out.strip() or rc))
+            return ("err", "临时任务启动不了：%s" % (out.strip() or rc))
         # 轮询到不再是 Running 为止。出 13 份报表实测 60～70 秒。
         for _ in range(90):
             st = task_state(REHEARSAL) or {}
@@ -491,41 +526,47 @@ class SchedApp(object):
         if kind == "err":
             self.log("✗ %s" % val, "bad")
             return
-        meaning = {"0": ("✓ 彩排通过：任务被正常拉起，报表也出来了", "good"),
-                   "1": ("✓ 彩排通过：链路是通的。报表有校验未过（每月常态），"
-                         "看 logs 里的日志", "good"),
-                   "267009": ("⚠ 还在跑，等会儿点「刷新」", "warn")}
+        meaning = {"0": ("✓ 试跑通过：Windows 能把程序拉起来，报表也出来了。"
+                         "到时候会自动跑。", "good"),
+                   "1": ("✓ 试跑通过：Windows 能把程序拉起来，报表出来了，"
+                         "但有几项要人看一眼（这在每个月都很常见）。", "good"),
+                   "267009": ("⚠ 还没跑完，过一会儿点「刷新」", "warn")}
         msg, tag = meaning.get(
-            val, ("✗ 彩排失败，退出码 %s —— 翻 logs\\monthly_*.log" % val, "bad"))
+            val, ("✗ 试跑没成功（代码 %s）。点「打开日志文件夹」看 "
+                  "monthly_年月.log 里的原因。" % val, "bad"))
         self.log(msg, tag)
-        self.log("临时任务已删除。", "dim")
+        self.log("临时任务已经删掉了。", "dim")
 
     def do_run_now(self):
-        if not task_state(TASK):
-            messagebox.showinfo("还没有任务", "先点「创建 / 更新任务」。")
-            return
         if not messagebox.askokcancel(
-                "立即跑一次",
-                "现在就完整跑一遍：下载 + 出报表，约 3 小时。\n\n"
-                "期间这台机器会反复开关紫鸟浏览器，请不要手动去点紫鸟。\n"
-                "这个窗口可以关掉，任务在后台照跑。\n\n开始？"):
+                "现在就跑一次",
+                "立刻完整跑一遍：下载 + 出报表，约 3 小时。\n\n"
+                "跑的时候浏览器会自己反复开关，别去点它。\n"
+                "这个窗口可以关掉，不影响后台继续跑。\n\n开始？"):
             return
-        self._work(lambda: _run(["schtasks", "/run", "/tn", TASK]),
-                   self._after_run_now)
+        self._work(self._run_now_body, self._after_run_now, label="现在就跑一次")
+
+    def _run_now_body(self):
+        # 查任务在不在要 2 秒，放子线程里做，不然界面会卡住不动。
+        if not task_state(TASK):
+            return (-2, "")
+        return _run(["schtasks", "/run", "/tn", TASK])
 
     def _after_run_now(self, r):
         rc, out = r
-        if rc == 0:
-            self.log("✓ 已启动。进度看 logs\\monthly_*.log，"
-                     "或过一会儿点「刷新」。", "good")
+        if rc == -2:
+            self.log("✗ 还没设置过自动跑，先点「设为每月自动跑」。", "bad")
+        elif rc == 0:
+            self.log("✓ 已经开始跑了。跑完前这个状态栏不会变，"
+                     "过一会儿点「刷新」看进度，或去日志文件夹看。", "good")
         else:
-            self.log("✗ 启动失败：%s" % (out.strip() or rc), "bad")
+            self.log("✗ 没能启动：%s" % (out.strip() or rc), "bad")
 
     def do_check(self):
         self.log("")
         self.log("=" * 64)
-        self.log(">>> 机器自检")
-        self._work(machine_checks, self._after_check)
+        self.log(">>> 检查这台电脑")
+        self._work(machine_checks, self._after_check, label="检查这台电脑")
 
     def _after_check(self, items):
         bad = 0
@@ -535,42 +576,46 @@ class SchedApp(object):
             if ok is False:
                 bad += 1
             self.log("%s  %-16s %s" % (mark, title, note), tag)
-        if bad:
-            self.log("%d 项没过。没过的项不修，定时任务可能半夜跑不起来。" % bad,
-                     "warn")
-            if messagebox.askyesno(
-                    "修电源设置",
-                    "要现在把「不睡眠 / 不休眠 / 不关屏」设好吗？\n\n"
-                    "会弹一个管理员确认框。自动登录和屏保要手动设，\n"
-                    "改不了的项日志里写了怎么办。"):
-                self._work(fix_power, self._after_fix)
-        else:
-            self.log("全部通过，这台机器可以无人值守。", "good")
+        if not bad:
+            self.log("全都没问题，这台电脑可以半夜没人管地自己跑。", "good")
+            return
+        self.log("有 %d 项不合格。不处理的话，到时候可能跑不起来。" % bad, "warn")
+        if messagebox.askyesno(
+                "要现在设好吗",
+                "可以帮你把「不睡眠 / 不休眠 / 屏幕不自动关」一次设好。\n\n"
+                "会弹一个 Windows 的管理员确认框，点「是」就行。\n\n"
+                "另外两项（开机自动登录、屏保锁屏）需要你手动设，\n"
+                "上面列表里写了在哪里设。"):
+            self._work(fix_power, self._after_fix, label="设置电源")
 
     def _after_fix(self, r):
         rc, out = r
-        self.log("电源设置已执行，重新自检一次看看。" if rc == 0
-                 else "没改成：%s" % (out.strip() or rc),
+        self.log("已设置。再点一次「检查这台电脑」确认。" if rc == 0
+                 else "没能设置：%s" % (out.strip() or rc),
                  "good" if rc == 0 else "bad")
 
     def do_delete(self):
         if not messagebox.askokcancel(
-                "删除定时任务",
-                "只撤掉 Windows 里的计划任务，脚本、下载的数据、已生成的报表\n"
-                "都不会动。以后想再开，回来点「创建 / 更新任务」即可。\n\n确定？"):
+                "取消每月自动跑",
+                "以后不再自动跑了。\n\n"
+                "只是撤掉 Windows 里的登记 —— 程序、下载好的数据、已经出的\n"
+                "报表都不会动，手动跑也照常。想恢复就再点「设为每月自动跑」。\n\n"
+                "确定？"):
             return
         self._work(lambda: _run(["schtasks", "/delete", "/tn", TASK, "/f"]),
-                   self._after_delete)
+                   self._after_delete, label="取消每月自动跑")
 
     def _after_delete(self, r):
         rc, out = r
-        self.log("✓ 已删除。" if rc == 0 else "✗ 删除失败：%s" % (out.strip() or rc),
+        self.log("✓ 已取消，以后不会自动跑了。" if rc == 0
+                 else "✗ 没能取消：%s" % (out.strip() or rc),
                  "good" if rc == 0 else "bad")
         self.refresh()
 
     def do_logs(self):
         if not os.path.isdir(LOG_DIR):
-            messagebox.showinfo("还没有日志", "目录还不存在：\n%s" % LOG_DIR)
+            messagebox.showinfo("还没有日志",
+                                "还没跑过，所以还没有日志：\n%s" % LOG_DIR)
             return
         if os.name == "nt":
             os.startfile(LOG_DIR)             # noqa: S606
