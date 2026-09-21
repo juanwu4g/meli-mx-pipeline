@@ -148,7 +148,8 @@ def set_download_dir(driver, path):
         return False
 
 
-def wait_for_downloads(path, before, min_files=1, timeout=240, settle=12, label=""):
+def wait_for_downloads(path, before, min_files=1, timeout=240, settle=12, label="",
+                       start_timeout=None):
     """Block until downloads have *settled*, and return the new filenames.
 
     "Select all reports" fires several downloads a few seconds apart, so
@@ -162,13 +163,25 @@ def wait_for_downloads(path, before, min_files=1, timeout=240, settle=12, label=
     The second branch matters: `min_files` is a prediction (the number of report
     checkboxes ticked), not a promise. Without the escape hatch a wrong
     prediction would burn the whole `timeout` on every affected period.
+
+    `start_timeout`：多少秒内**连一个下载都没开始**（连 .crdownload 都没有）
+    就放弃。上面那个逃生口要求至少见过一个文件，所以点了之后什么都没发生时它
+    永远不触发，会干等满 `timeout`。9/21 凌晨平台的库存报表没有响应，
+    costos×2 + general 每家店白等 3×240 秒，把一轮 3 小时的批次拖到 5 小时
+    以上，被计划任务的超时整批杀掉，报表那一步根本没跑到。默认 None 保持原
+    行为 —— 只给"点了就该立刻开始下载"的路线用。
     """
     deadline = time.time() + timeout
+    began = time.time()
     seen = set()
     last_change = time.time()
     while time.time() < deadline:
         time.sleep(2)
         new = set(snapshot_dir(path)) - set(before)
+        if start_timeout and not new and time.time() - began >= start_timeout:
+            print("  [警告] %s：%d 秒内没有任何下载开始，平台可能没响应，放弃等待"
+                  % (label or "download", start_timeout))
+            return []
         pending = [k for k in new if k.endswith((".crdownload", ".tmp"))]
         done = {k for k in new if not k.endswith((".crdownload", ".tmp"))}
         if done != seen:
@@ -394,12 +407,20 @@ def download_billing_for_months(driver, download_dir, year, month,
     ——只下 7 月的话纯佣金少算 973.23，而代扣税是用「Ventas 合并值 − 纯佣金」
     倒推的，于是等额虚高，税率从 9.172% 变成 9.221%。
 
-    超出当月的期数会被平台的页面校验挡掉（月份名对不上就跳过），所以这里
-    不必自己算上限。
+    **还没开始的账期直接不去请求。** 原来的假设是"超出当月的期数会被页面校验
+    挡掉，不必自己算上限"——挡是挡得住，但不便宜：明细页打开后要等 Reportes
+    面板 90 秒超时，才报「Reportes panel never rendered」。9 月中旬跑
+    --month 2026-08 时，8 月后面的第 2 期是 10 月，每家店都为它白等一次、
+    报一条吓人的警告，12 家店就是约 18 分钟。当月（还没结账）的账期仍然要下
+    —— 它的明细页已经存在，月末订单的费用就记在里面。
     """
     out = {}
     y, mo = year, month
+    today = datetime.date.today()
     for i in range(max(1, extra + 1)):
+        if datetime.date(y, mo, 1) > today:
+            print("    跳过 %04d-%02d 的账单：账期还没开始" % (y, mo))
+            break
         got = download_billing_for_period(driver, download_dir, y, mo, timeout)
         if not got and i > 0:
             break            # 后续期拿不到很正常（还没到/已关闭），不算失败
@@ -763,6 +784,10 @@ def download_sales_excel(driver, download_dir, timeout=300, period_months=6):
 #     selected every earlier day becomes --disabled, so doing it backwards
 #     silently selects only one end of the range.
 
+# 库存报表点了就该立刻开始下载（9/17 那一轮每家店都是几秒内落盘）。
+# 60 秒内连个 .crdownload 都没出现，就是平台没响应，不必等满 240 秒。
+STOCK_START_TIMEOUT = 60
+
 STOCK_REPORTS = [
     ("costos",       "reporte de costos por el servicio de almacenamiento"),
     ("general",      "reporte general de stock"),
@@ -1075,7 +1100,8 @@ def _download_storage_costs(driver, download_dir, label, periods=2, timeout=240)
 
         files = wait_for_downloads(download_dir, before, min_files=1,
                                    timeout=timeout, settle=6,
-                                   label="stock/costos[%d]" % i)
+                                   label="stock/costos[%d]" % i,
+                                   start_timeout=STOCK_START_TIMEOUT)
         for f in files:
             print("        + %s" % f)
         out.extend(files)
@@ -1134,7 +1160,8 @@ def download_stock_reports(driver, download_dir, months_back=2, timeout=240,
 
         files = wait_for_downloads(download_dir, before, min_files=1,
                                    timeout=timeout, settle=6,
-                                   label="stock/%s" % key)
+                                   label="stock/%s" % key,
+                                   start_timeout=STOCK_START_TIMEOUT)
         for f in files:
             print("      + %s" % f)
         results[key] = files

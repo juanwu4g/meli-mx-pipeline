@@ -48,9 +48,13 @@ REHEARSAL = TASK + "-试跑"
 RUNNER = os.path.join(ROOT, "run_monthly.cmd")
 LOG_DIR = os.path.join(ROOT, "logs")
 
-# 任务超时。一次 12 家店的完整跑批实测 2h48m–4h00m（logs/batch_*.json），
-# 留到 5 小时：既能兜住卡死，又不会在正常的慢批次上误杀。
-TIME_LIMIT = "PT5H"
+# 任务超时，超了 Windows 会把**整条链**杀掉，报表那一步就再也跑不到。
+# 实测：9/17 那轮带 --month 的批次每家店 8–15 分钟，全程约 3 小时；9/21 凌晨
+# 平台库存报表没响应，每家店 26.5 分钟，全程约 5.3 小时 —— 超过当时的 5 小时
+# 上限被杀，当月没出报表。已经修掉了那晚浪费时间的两处（未开始的账期、下载
+# 根本没开始时干等满 240 秒），坏的一晚也回到约 3.2 小时；这里再放宽到 6 小时
+# 作为余量。杀掉一轮的代价是整月没报表，多给一小时的代价只在真卡住时才付。
+TIME_LIMIT = "PT6H"
 
 MONTHS_XML = "".join("<%s/>" % m for m in (
     "January February March April May June July August September October "
