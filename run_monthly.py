@@ -68,6 +68,34 @@ def now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+GUI_SETTINGS = os.path.join(ROOT, "gui_settings.json")
+
+
+def resolve_out_dir(cli=None):
+    """报表输出目录，返回 (目录, 来源)。
+
+    优先级：命令行 --out-dir > 主界面里选的 > 默认目录。
+
+    以前这里只认命令行，缺省就是写死的 downloads\\data\\reports\\financial。
+    而定时任务调用本脚本时**不带任何参数** —— 于是在主界面把输出目录指到
+    共享盘的人，定时任务出的报表却落进了默认目录，去平常的地方看什么都没有，
+    看起来就像"只下载、没出报表"。告警文件也跟着写错了地方。
+
+    直接读 gui_settings.json 而不 import gui：那会把 tkinter 拖进一个无界面的
+    计划任务里。定时设置界面从这里 import 同一个函数，规则只有一份。
+    """
+    if cli:
+        return cli, "命令行 --out-dir"
+    try:
+        with io.open(GUI_SETTINGS, encoding="utf-8") as f:
+            d = (json.load(f) or {}).get("out_dir")
+        if d and str(d).strip():
+            return str(d).strip(), "主界面里选的，存在 gui_settings.json"
+    except Exception:
+        pass
+    return OUT_DIR, "默认"
+
+
 def config():
     """读 config.json 里的 monthly 段。读不到就当没配，不影响主流程。"""
     try:
@@ -225,7 +253,8 @@ def main():
                     help="目标月份，默认上个月")
     ap.add_argument("--step", choices=["both", "download", "report"],
                     default="both", help="只跑其中一步")
-    ap.add_argument("--out-dir", default=OUT_DIR, help="报表输出目录")
+    ap.add_argument("--out-dir", default=None,
+                    help="报表输出目录。不给就用主界面里选的，再不行用默认目录")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印会执行什么")
     args = ap.parse_args()
@@ -233,6 +262,8 @@ def main():
     month = args.month or prev_month()
     tag = month.replace("-", "")
     log_path = os.path.join(LOG_DIR, "monthly_%s.log" % tag)
+    json_path = os.path.join(LOG_DIR, "monthly_%s.json" % tag)
+    out_dir, out_src = resolve_out_dir(args.out_dir)
     py = sys.executable
 
     dl = [py, "-u", os.path.join(ROOT, "run_batch.py"), "--month", month]
@@ -240,11 +271,11 @@ def main():
     # MX_ML_全店汇总_<月>.xlsx 的文件，把真正的 12 店汇总覆盖掉。需要补单店
     # 的时候走界面或者直接敲 run_reports.py，那边有对应的开关。
     rp = [py, "-u", os.path.join(ROOT, "run_reports.py"), "--month", month,
-          "--out-dir", args.out_dir]
+          "--out-dir", out_dir]
 
     print("目标月份：%s" % month)
     print("日志　　：%s" % log_path)
-    print("输出目录：%s" % os.path.abspath(args.out_dir))
+    print("输出目录：%s（%s）" % (os.path.abspath(out_dir), out_src))
     if args.dry_run:
         print("\n[dry-run] 会依次执行：")
         if args.step in ("both", "download"):
@@ -256,23 +287,46 @@ def main():
     if not acquire():
         return 5
 
-    began = now()
+    if not os.path.isdir(LOG_DIR):
+        os.makedirs(LOG_DIR)
+
     # bad    ：写进控制台和摘要，供人翻查
     # urgent ：还要写成告警文件推到财务眼前。判断标准见 alert() 的说明。
-    steps, worst, bad, urgent = [], 0, [], []
-    try:
-        if not os.path.isdir(LOG_DIR):
-            os.makedirs(LOG_DIR)
+    steps, bad, urgent = [], [], []
+    doc = {"month": month, "began": now(), "ended": None, "status": "running",
+           "steps": steps, "exit": None, "urgent": urgent,
+           "log": log_path, "out_dir": os.path.abspath(out_dir),
+           "out_dir_source": out_src}
 
+    def save(**kw):
+        """摘要在开跑时、每一步之后、以及每一条退出路径上都落盘。
+
+        以前只在最后写一次，于是两种情况都查不出来：下载硬失败走的是 try 里的
+        早退，直接跳过了写摘要那段；被计划任务超时强杀时进程根本走不到最后。
+        现在被杀的那次会留下 status=running、而且缺某一步的记录 —— 事后一看
+        就知道是断在哪儿，而不是像从来没跑过。
+        """
+        doc.update(kw)
+        try:
+            with io.open(json_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(doc, ensure_ascii=False, indent=2))
+        except Exception as e:
+            print("[警告] 摘要写不进去：%s" % str(e)[:100])
+
+    save()
+    worst = 0
+    try:
         if args.step in ("both", "download"):
             code, secs = run("① 下载 %s 的数据" % month, dl, log_path)
             steps.append({"step": "download", "code": code, "seconds": secs})
             worst = max(worst, code)
+            save()
             if code >= 2:
                 urgent.append("下载失败（退出码 %d），报表未生成。"
                               "多半是紫鸟没起来或者配置有问题。" % code)
                 bad += urgent
-                alert(month, urgent, args.out_dir)
+                save(status="failed", exit=code, ended=now())
+                alert(month, urgent, out_dir)
                 return code
             if code == 1:
                 urgent.append("部分店铺下载失败，报表已按现有数据生成，"
@@ -293,12 +347,7 @@ def main():
     finally:
         release()
 
-    doc = {"month": month, "began": began, "ended": now(), "steps": steps,
-           "exit": worst, "urgent": urgent,
-           "log": log_path, "out_dir": os.path.abspath(args.out_dir)}
-    with io.open(os.path.join(LOG_DIR, "monthly_%s.json" % tag),
-                 "w", encoding="utf-8") as f:
-        f.write(json.dumps(doc, ensure_ascii=False, indent=2))
+    save(status="done", exit=worst, ended=now())
 
     print("\n" + "=" * 70)
     if worst == 0:
@@ -308,7 +357,7 @@ def main():
         for b in bad:
             print("  · %s" % b)
         if urgent:
-            alert(month, urgent, args.out_dir)
+            alert(month, urgent, out_dir)
     print("=" * 70)
     return worst
 

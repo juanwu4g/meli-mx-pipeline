@@ -40,6 +40,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from gui import ROOT, interpreter, store_list, load_settings, save_settings
+# 报表输出目录的解析规则只有一份，在 run_monthly 里 —— 定时任务真正跑的是它。
+from run_monthly import resolve_out_dir
 
 TASK = "MX月度报表"
 REHEARSAL = TASK + "-试跑"
@@ -483,9 +485,13 @@ class SchedApp(object):
         self.status.set("● 已设置：每月 %s 号 %s 自动跑"
                         % (st.get("DAY"), st.get("TIME")))
         self.status_lbl.configure(foreground="#1a7f37")
-        self.detail.set("下次：%s\n上次：%s\n%s"
+        # 报表写到哪儿必须摆在眼前：定时任务和主界面曾经各用各的目录，
+        # 结果报表出了却落在别处，看起来像"只下载没出报表"。
+        out, src = resolve_out_dir()
+        self.detail.set("下次：%s\n上次：%s\n%s\n报表写到：%s（%s）"
                         % (st.get("NEXT") or "还没跑过",
-                           st.get("LAST") or "还没跑过", verdict))
+                           st.get("LAST") or "还没跑过", verdict,
+                           os.path.abspath(out), src))
         # 界面上的时间跟已登记的对齐，免得改了没保存的人看错
         try:
             self.day.set(int(st.get("DAY")))
