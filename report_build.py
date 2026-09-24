@@ -539,11 +539,58 @@ def sales_window_start(meta):
     return d - pd.DateOffset(months=int(n))
 
 
+class VentasIncomplete(Exception):
+    """平台自己声明这份销售导出不完整。不能用来做账。"""
+
+
+# 导出顶部那条横幅：「No pudimos mostrar algunos datos. Intenta generando el
+# Excel de ventas nuevamente.」它一出现就说明**平台承认这份导出缺数据**。
+VENTAS_INCOMPLETE_RE = re.compile(r"no pudimos mostrar algunos datos", re.I)
+
+
+def _ventas_header_row(path, limit=16):
+    """定位表头行（0-indexed），并捡出顶部的"数据不全"横幅。返回 (行号, 横幅)。
+
+    表头不在固定行：平台会往顶部插公告行，插一条就把表头往下推一行。9/15
+    TOOL_TA03 那份正是被这条横幅推到了第 7 行，而这里原来写死第 6 行，于是
+    读到的"表头"是分组行「Ventas」——Fecha de venta 整列不存在，日期全成
+    NaT，整家店被剔除，而报错只会说"没有日期"，看不出真正原因。
+
+    横幅要单独检出并**拒绝**，不能只把表头修对：修对之后管线会顺利吃下一份
+    平台承认残缺的导出，出一份偏低却看起来完全正常的报表 —— 比直接拒绝危险
+    得多。那份文件里 4599 行日期其实都解析得出来，正是这种"看着没毛病"。
+    """
+    top = pd.read_excel(path, sheet_name=VENTAS_SHEET, header=None, nrows=limit)
+    hdr, notice = None, ""
+    for i in range(len(top)):
+        vals = [str(v).strip() for v in top.iloc[i].tolist()
+                if v is not None and str(v) != "nan"]
+        if VENTAS_INCOMPLETE_RE.search(" ".join(vals)):
+            notice = next((v for v in vals if VENTAS_INCOMPLETE_RE.search(v)), "")
+        if hdr is None and V_ORDER_ID in vals and V_DATE in vals:
+            hdr = i
+    return hdr, notice
+
+
 def load_ventas(folder):
     path = _first(["*Ventas_MX*.xlsx", "*Ventas*.xlsx"], folder)
     if not path:
         raise IOError("找不到 Ventas 报表：%s" % folder)
-    df = pd.read_excel(path, sheet_name=VENTAS_SHEET, header=VENTAS_HEADER_ROW)
+    hdr, notice = _ventas_header_row(path)
+    if notice:
+        raise VentasIncomplete(
+            "平台在这份 Ventas 导出里写着：「%s」—— 它自己承认数据不全，"
+            "不能用来做账。请重新下载这家店的 Ventas 再出报表。文件：%s"
+            % (notice, os.path.basename(path)))
+    if hdr is None:
+        hdr = VENTAS_HEADER_ROW
+        print("    [警告] 没在前 16 行里找到表头（认的是「%s」+「%s」），"
+              "按第 %d 行读。列名可能不对。"
+              % (V_ORDER_ID, V_DATE, VENTAS_HEADER_ROW + 1))
+    elif hdr != VENTAS_HEADER_ROW:
+        print("    [提示] 表头在第 %d 行（通常是第 %d 行），平台在顶部多插了行，"
+              "已按实际行读。" % (hdr + 1, VENTAS_HEADER_ROW + 1))
+    df = pd.read_excel(path, sheet_name=VENTAS_SHEET, header=hdr)
     df["fecha"] = df[V_DATE].map(parse_spanish_date) if V_DATE in df.columns else pd.NaT
     # pandas 2 的 astype(str) 把 NaT 变成字面量 "NaT"，pandas 3 让它保持 NaN。
     # 本文件有 5 处 `ym != "NaT"` 的过滤依赖那个字面量（3613/3669/4492 等），
@@ -4643,7 +4690,12 @@ def main(argv=None):
     stores, unusable = [], []
     for name, path in a.store:
         print("[读取] %s ← %s" % (name, path))
-        S = derive(name, path, p0, p1)
+        try:
+            S = derive(name, path, p0, p1)
+        except VentasIncomplete as e:
+            # 和下面"没有日期"走同一条路：剔除这家店、其余照出、⑩ 页记一笔。
+            unusable.append((name, str(e)))
+            continue
         V = S["ventas_all"]
         # Ventas 导出偶尔整列缺销售日期（平台换了导出模板，或者文件本身是坏的）。
         # 没有日期就没有会计期间，这家店的所有口径都无从谈起。以前这种数据要一路
