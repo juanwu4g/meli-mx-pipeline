@@ -730,9 +730,39 @@ def load_returns(folder):
     r = r.dropna(how="all")
     if "Fecha de revisión" in r.columns:
         r["fr"] = pd.to_datetime(r["Fecha de revisión"], format="%d-%m-%Y", errors="coerce")
+        if len(r) and not r["fr"].notna().any():
+            eg = [str(v) for v in r["Fecha de revisión"].dropna().head(3)]
+            print("    [警告] Returns 的「Fecha de revisión」没有一个值能按 "
+                  "%%d-%%m-%%Y 解析（样例：%s）。按质检日的统计会失真。"
+                  % ("、".join(eg) or "整列为空"))
     else:
+        # 取列名要在加 fr 之前 —— 否则报错里会列出我们自己加的那一列，
+        # 看的人会以为文件里真有它。
+        cols = [str(c) for c in r.columns if not str(c).startswith("Unnamed")]
         r["fr"] = pd.NaT
+        print("    [警告] Returns 的 Triages 页没有「Fecha de revisión」列，"
+              "表头可能不在第 %d 行。实际列名：%s"
+              % (RETURNS_HEADER_ROW + 1, "、".join(cols[:8]) or "（一个都没有）"))
     return path, r
+
+
+def date_span(s):
+    """把一列日期渲染成「起 ~ 止」；没有一个能用的日期就返回 None。
+
+    退货的质检日 `fr` 由固定格式 %d-%m-%Y 加 errors="coerce" 解析，列缺了或
+    格式变了就整列 NaT。而 NaT 不支持 strftime —— 直接 ValueError。
+
+    出事的两处守卫写的都是 len(returns_all) 非空。**"有行"和"有能用的日期"
+    是两回事**，这个混淆在这个文件里已经犯过三次（build_context 的 cutoff、
+    店铺可用性、这里）。9/24 EWTTO_SM 就栽在这儿：十二条校验全过、结果都打
+    出来了，倒在写工作簿的最后一步，磁盘上留下的还是上一次的旧报表。
+    """
+    if s is None or not len(s):
+        return None
+    lo, hi = s.min(), s.max()
+    if pd.isna(lo) or pd.isna(hi):
+        return None
+    return "%s ~ %s" % (lo.strftime("%Y-%m-%d"), hi.strftime("%Y-%m-%d"))
 
 
 STOCK_SHEET = "Resumen"
@@ -2773,9 +2803,8 @@ def sheet_triage(wb, stores, ctx):
     have = [S for S in stores if len(S["returns"])]
     none = [S["store"] for S in stores if not len(S["returns"])]
     cover = "；".join(
-        "%s 覆盖 %s ~ %s 共 %d 件（其中本期 %d 件）"
-        % (S["store"], S["returns_all"]["fr"].min().strftime("%Y-%m-%d"),
-           S["returns_all"]["fr"].max().strftime("%Y-%m-%d"),
+        "%s 覆盖 %s，共 %d 件（其中本期 %d 件）"
+        % (S["store"], date_span(S["returns_all"]["fr"]) or "（质检日读不出来）",
            len(S["returns_all"]), len(S["returns"]))
         for S in stores if len(S.get("returns_all", [])))
     ws["A2"] = ("数据源：Returns_*.xlsx（Triages 页），按【质检日】记录，不是按订单日 —— "
@@ -4367,8 +4396,10 @@ def sheet_gaps(wb, stores, ctx):
         if S["files"].get("returns") and len(S.get("returns_all", [])):
             ra = S["returns_all"]
             items.append(("中", "退货质检报表期间不匹配（%s）" % S["store"],
-                          "Returns 报表按【质检日】导出，本次覆盖 %s ~ %s；本期订单的退货可能下月才质检。"
-                          % (ra["fr"].min().strftime("%Y-%m-%d"), ra["fr"].max().strftime("%Y-%m-%d")),
+                          "Returns 报表按【质检日】导出，本次覆盖 %s；本期订单的退货可能下月才质检。"
+                          % (date_span(ra["fr"])
+                             or "（质检日一列读不出来 —— 表头或日期格式可能变了，"
+                                "先看运行日志里的警告）"),
                           "每月固定在月结后 15 天再导一次 Returns，用【订单号】与销售报表关联，"
                           "才能把退货损失准确归到销售月份。",
                           "本期退货损失可能被低估（部分本期订单的退货尚未质检完）。"))
