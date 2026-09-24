@@ -4650,9 +4650,22 @@ def main(argv=None):
         # 走到 build_context 才炸 —— 而且是在**汇总**阶段炸，一家店的坏文件把另外
         # 11 家的汇总表一起带走。就地剔除，并在 ⑩ 页记一条未通过的校验。
         if len(V) and not V["fecha"].notna().any():
-            unusable.append((name, "Ventas 报表没有一行带销售日期，多半是导出缺少"
-                                   "日期列或文件损坏。本店已从本报表剔除，"
-                                   "请重新下载这家店的 Ventas 再出一次。"))
+            # 把"为什么没有日期"直接说出来。两种成因的处理办法完全不同，而光说
+            # "没有日期"两种都像，只能去人工开文件看。TOOL_TA03（9/15）和
+            # EWTTO_SM（9/24）先后中过同一个症状，两次都得重新翻文件才知道。
+            cols = [str(c) for c in V.columns if not str(c).startswith("Unnamed")]
+            if V_DATE in V.columns:
+                why = ("列「%s」在，但没有一个值能解析成日期 —— 多半是平台改了"
+                       "日期格式。" % V_DATE)
+            else:
+                why = ("导出里根本没有「%s」这一列 —— 多半是导出时账号界面语言"
+                       "不是西班牙语（列名会跟着变），或者表头不在第 %d 行。"
+                       % (V_DATE, VENTAS_HEADER_ROW + 1))
+            unusable.append((name, "Ventas 报表没有一行带销售日期。%s"
+                                   "文件里的列名（前 8 个）：%s。"
+                                   "本店已从本报表剔除，请重新下载这家店的 "
+                                   "Ventas 再出一次。"
+                                   % (why, "、".join(cols[:8]) or "（一个都没有）")))
             continue
         stores.append(S)
 
